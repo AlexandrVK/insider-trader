@@ -1,10 +1,11 @@
 """
 Insider Copy Trader — веб-сервис: отслеживает трейдеров Hyperliquid и копирует их входы на виртуальном (paper) счёте.
-v0.2
+v0.3
 """
 import collections
 import hashlib
 import hmac
+import html
 import re
 import secrets
 import time
@@ -15,12 +16,14 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 
 import config
+import diag
 import llm
 import ui
 from engine import Engine
 
 VERSION = re.search(r"v(\d+\.\d+)", __doc__).group(1)
 engine = None
+startup_error = None
 
 # ---------- авторизация ----------
 # На Render админка работает только с паролем >= 12 символов; локально без пароля - открыта (слушаем только 127.0.0.1).
@@ -51,11 +54,13 @@ def authed(request):
         return False
 
 
-def api_guard(request: Request):
+def api_guard(request: Request, need_engine=True):
     if LOCKED or not authed(request):
         raise HTTPException(401)
     if request.method == "POST" and request.headers.get("x-requested-with") != "fetch":
         raise HTTPException(403)
+    if need_engine and engine is None:
+        raise HTTPException(503, startup_error or "движок не запущен")
 
 
 def client_ip(request):
@@ -72,11 +77,18 @@ def is_locked_out(ip):
 # ---------- приложение ----------
 @asynccontextmanager
 async def lifespan(app):
-    global engine
-    engine = Engine()
-    engine.start()
+    global engine, startup_error
+    engine, startup_error = None, None
+    print(diag.storage_summary())
+    try:
+        engine = Engine()
+        engine.start()
+    except Exception as e:  # сервис остаётся живым (health, самотест), чтобы причину было видно, а не просто падение
+        startup_error = diag.explain(e)
+        print("[FATAL] торговый движок не запустился:\n" + startup_error)
     yield
-    engine.shutdown()  # uvicorn вызывает это при SIGTERM
+    if engine:
+        engine.shutdown()  # uvicorn вызывает это при SIGTERM
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -136,6 +148,8 @@ def panel(request: Request):
         return HTMLResponse("Админка отключена: задайте ADMIN_PASSWORD (не короче 12 символов).", status_code=503)
     if not authed(request):
         return RedirectResponse("/login", status_code=303)
+    if engine is None:
+        return ui.ERROR.replace("__MSG__", html.escape(startup_error or "движок не запущен"))
     warn = "" if AUTH_ON else '<div class="w">Локальный режим: авторизация выключена (сервис слушает только 127.0.0.1).</div>'
     if engine.status()["storage"] == "LocalStorage" and config.IS_RENDER:
         warn += '<div class="w">Внимание: на Render данные пишутся локально и пропадут при рестарте - проверьте S3_* переменные.</div>'
@@ -180,6 +194,12 @@ def analytics_json(request: Request):
     return JSONResponse(engine.analytics(VERSION), headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+@app.post("/api/selftest")
+def selftest(request: Request):
+    api_guard(request, need_engine=False)
+    return {"report": diag.run_all()}
+
+
 @app.post("/api/ai_summary")
 def ai_summary(request: Request):
     api_guard(request)
@@ -187,7 +207,7 @@ def ai_summary(request: Request):
     brief = {k: a[k] for k in ("summary", "by_coin", "by_exit_reason", "by_traders_count", "signals")}
     provider, text = llm.ask("Это результаты paper-торговли копированием трейдеров Hyperliquid. Кратко (до 12 строк) "
                              "оцени, что работает, что нет, и что стоит поменять в параметрах.\n" + str(brief)[:6000])
-    return {"provider": provider, "text": text or "ИИ недоступен (проверьте OPENROUTER_API_KEY / ANYMODEL_API_KEY)."}
+    return {"provider": provider, "text": text or "ИИ недоступен (проверьте ANYMODEL_API_KEY / GROQ_API_KEY)."}
 
 
 if __name__ == "__main__":

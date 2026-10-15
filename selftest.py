@@ -1,11 +1,20 @@
-"""Офлайн-проверка логики на подставных данных Hyperliquid: python selftest.py"""
+"""Самотест.
+  python selftest.py        - офлайн-проверка логики на подставных данных (без сети)
+  python selftest.py live   - боевая проверка: хранилище (S3/локально), ИИ, Hyperliquid, Google News (нужны ваши ключи/.env)"""
 import os
+import sys
 import tempfile
 import time
+
+if len(sys.argv) > 1 and sys.argv[1] == "live":
+    import diag
+    diag.run_all()
+    sys.exit(0)
 
 os.environ["DATA_DIR"] = tempfile.mkdtemp()
 os.environ["ADMIN_PASSWORD"] = "correct-horse-battery"
 
+from fastapi.testclient import TestClient
 import hl
 import scoring
 from engine import Engine
@@ -94,13 +103,13 @@ print("engine ok")
 import llm, webcheck
 sig = {"addrs": [A, B], "side": "LONG", "coin": "BTC", "usd": 1e6}
 answers = [{"queries": ["BTC hack"], "veto": False, "reason": ""}, {"queries": [], "veto": True, "reason": "hack"}]
-llm.ask_json = lambda p: answers.pop(0)
+llm.ask_json = lambda p, fast=False, log=None: answers.pop(0)
 webcheck.headlines = lambda q: ["Mon | X | BTC exchange hacked"]
 v, r, log = webcheck.review(sig)
 assert v and log["queries"] == ["BTC hack"] and log["headlines"] == 1
-llm.ask_json = lambda p: {"queries": [], "veto": True, "reason": "x"}       # вето без поиска не засчитывается
+llm.ask_json = lambda p, fast=False, log=None: {"queries": [], "veto": True, "reason": "x"}       # вето без поиска не засчитывается
 assert webcheck.review(sig)[0] is False
-llm.ask_json = lambda p: None                                                # ИИ недоступен = нет вето
+llm.ask_json = lambda p, fast=False, log=None: None                                                # ИИ недоступен = нет вето
 assert webcheck.review(sig)[0] is False
 
 e.cfg["ai_web"] = True
@@ -119,8 +128,64 @@ for verdict, coin, want in ((False, "ETH", "opened"), (True, "SOL", "ai_veto")):
     assert any(p["coin"] == coin for p in e.state["positions"]) == (want == "opened")
 print("web-check ok")
 
+# --- 4c. каскад ИИ: AnyModel падает, Groq: первая модель падает, вторая отвечает ---
+import importlib, types
+importlib.reload(llm)           # вернуть настоящие ask/ask_json (выше они подменены)
+import config as cfgmod
+cfgmod.GROQ_API_KEY = "gsk_test"
+calls = []
+class FakeClient:
+    def __init__(self, base_url, **kw):
+        self.base = base_url
+        self.models = types.SimpleNamespace(list=lambda: types.SimpleNamespace(data=[
+            types.SimpleNamespace(id="whisper-large", active=True), types.SimpleNamespace(id="llama-3.1-8b-instant", active=True),
+            types.SimpleNamespace(id="llama-3.3-70b-versatile", active=True)]))
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self.create))
+    def create(self, model, **kw):
+        calls.append((self.base.split("//")[1].split("/")[0], model))
+        if "anymodel" in self.base or model.startswith("llama-3.3"):
+            raise RuntimeError("boom")
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+            content='<think>x</think>```json {"ok": true} ```'))])
+llm.OpenAI = FakeClient
+log = []
+prov, data = llm.ask('x', parse=llm.extract_json, log=log)
+print("cascade:", prov, data, calls)
+assert prov == "Groq" and data == {"ok": True}
+assert calls[0][0] == "anymodel.org" and calls[1][1].startswith("llama-3.3") and not any("whisper" in c[1] for c in calls)
+assert any("AnyModel" in x and "boom" in x for x in log)
+
+# --- 4d. диагностика S3: ключ 003, endpoint 004 ---
+from botocore.exceptions import ClientError
+cfgmod.USE_S3, cfgmod.S3_ENDPOINT_URL = True, "https://s3.us-west-004.backblazeb2.com"
+cfgmod.S3_ACCESS_KEY, cfgmod.S3_SECRET_KEY, cfgmod.S3_BUCKET = "003dd3cd354fd700000000002", "K003abcdefghijklmnopqrstuvwxyz1", "b"
+import diag
+ex = ClientError({"Error": {"Code": "InvalidAccessKeyId", "Message": "The key is not valid"},
+                  "ResponseMetadata": {"HTTPStatusCode": 403, "RequestId": "r1"}}, "GetObject")
+txt = diag.explain(ex)
+print(txt)
+assert "кластере 003" in txt and "eu-central-003" in txt and "K003abc" not in txt
+cfgmod.USE_S3 = False
+
+# --- 4e. деградированный старт: хранилище недоступно, сервис жив и показывает причину ---
+import storage
+import engine as _e0
+orig = _e0.get_storage
+def broken(): raise ex
+import engine as engmod
+engmod.get_storage = broken
+import app as appmod2
+diag.run_all = lambda: "REPORT"
+with TestClient(appmod2.app) as c:
+    assert c.get("/health").status_code == 200
+    c.post("/login", data={"password": "correct-horse-battery"})
+    assert c.get("/api/status").status_code == 503
+    assert "не запустился" in c.get("/").text
+    assert c.post("/api/selftest", headers={"X-Requested-With": "fetch"}).json()["report"] == "REPORT"
+engmod.get_storage = orig
+print("diagnostics ok")
+
 # --- 5. авторизация и веб ---
-from fastapi.testclient import TestClient
 import app as appmod
 with TestClient(appmod.app) as c:
     assert c.get("/health").text.startswith("Insider")

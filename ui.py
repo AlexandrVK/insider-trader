@@ -27,8 +27,10 @@ __WARN__
 <button class="r" onclick="if(confirm('Сбросить счёт и историю? Сначала скачайте аналитику!'))cmd('reset')">Сброс счёта</button>
 <a class="b" href="/analytics.json" download>Скачать аналитику</a>
 <button onclick="ai()">ИИ-сводка</button>
+<button onclick="st()">Самотест</button>
 <form method="post" action="/logout" style="display:inline"><button>Выйти</button></form></p>
 <pre id="ai" style="display:none"></pre>
+<pre id="st" style="display:none"></pre>
 <h2>Открытые позиции</h2><div class="t" id="pos"></div>
 <h2>Последние сигналы</h2><div class="t" id="sig"></div>
 <h2>Отслеживаемые трейдеры</h2><div class="t" id="trd"></div>
@@ -55,7 +57,17 @@ async function load(){S=await api('/api/status');if(!S)return;
   S.tracked.map(t=>[t.addr.slice(0,10)+'…',t.name,t.score,t.precision,t.decisive,t.opens_per_day,Math.round(t.account),Math.round(t.month_pnl)]));
  $('err').innerHTML=tbl(['Время','Сообщение'],S.errors.map(e=>[tm(e.ts),e.msg]))}
 async function cmd(a){const r=await api('/api/cmd',{action:a});alert(r&&r.result||r&&r.error||'');load()}
-async function ai(){const b=$('ai');b.style.display='block';b.textContent='Запрос к ИИ…';const r=await api('/api/ai_summary',{});b.textContent=r?(r.provider?'['+r.provider+']\\n':'')+r.text:''}
+async function ai(){const b=$('ai');b.style.display='block';b.textContent='Запрос к ИИ…';const r=await api('/api/ai_summary',{});b.textContent=r?(r.provider?'['+r.provider+']\n':'')+r.text:''}
+async function st(){const b=$('st');b.style.display='block';b.textContent='Проверка хранилища, ИИ и сети (до минуты)…';const r=await api('/api/selftest',{});b.textContent=r?r.report:''}
 async function saveCfg(){try{const r=await api('/api/config',JSON.parse($('cfg').value));$('cm').textContent=r.error||'Сохранено'}catch(e){$('cm').textContent='Ошибка JSON: '+e}}
 (async()=>{const c=await api('/api/config');if(c)$('cfg').value=JSON.stringify(c,null,2);load();setInterval(load,15000)})();
 </script></html>"""
+
+ERROR = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ошибка запуска</title><style>body{font-family:system-ui;background:#111;color:#ddd;padding:16px;max-width:900px;margin:auto}
+pre{background:#1c1c1c;padding:10px;white-space:pre-wrap;font-size:12px}button{background:#2a3a4a;color:#fff;border:0;padding:8px 12px;border-radius:4px;cursor:pointer}</style>
+<h1>Сервис работает, но торговый движок не запустился</h1><pre>__MSG__</pre>
+<button onclick="st()">Самотест</button> <form method="post" action="/logout" style="display:inline"><button>Выйти</button></form>
+<pre id="st" style="display:none"></pre>
+<script>async function st(){const b=document.getElementById('st');b.style.display='block';b.textContent='Проверка…';
+const r=await fetch('/api/selftest',{method:'POST',headers:{'X-Requested-With':'fetch'}});b.textContent=r.status==401?'Сессия истекла, войдите заново':(await r.json()).report}</script></html>"""
