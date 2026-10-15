@@ -2,6 +2,16 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Локально переменные можно держать в файле .env рядом с кодом (на Render он не нужен; переменные окружения приоритетнее)
+_env = os.path.join(BASE_DIR, ".env")
+if os.path.exists(_env):
+    with open(_env, encoding="utf-8-sig") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip().strip("\"'"))
+
 # Render выставляет переменную RENDER автоматически
 IS_RENDER = bool(os.getenv("RENDER"))
 PORT = int(os.getenv("PORT", "8000"))
@@ -11,10 +21,10 @@ HOST = "0.0.0.0" if IS_RENDER else "127.0.0.1"
 _use = os.getenv("USE_S3", "auto").lower()
 USE_S3 = IS_RENDER if _use == "auto" else _use in ("1", "true", "yes")
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(BASE_DIR, "data"))
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
-S3_BUCKET = os.getenv("S3_BUCKET", "")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "").strip()
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "").strip()
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "").strip()
+S3_BUCKET = os.getenv("S3_BUCKET", "").strip()
 S3_PREFIX = os.getenv("S3_PREFIX", "insider-trader/")
 
 # Админка
@@ -22,9 +32,9 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 SESSION_HOURS = 12
 
-# ИИ (как в message_checker.py бота): OpenRouter -> AnyModel
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-ANYMODEL_API_KEY = os.getenv("ANYMODEL_API_KEY", "dummy_key")
+# ИИ (как в message_checker.py бота): AnyModel -> Groq
+ANYMODEL_API_KEY = os.getenv("ANYMODEL_API_KEY", "dummy_key").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 # Параметры стратегии. Переопределяются через страницу управления (хранятся в config.json).
 DEFAULTS = {
