@@ -57,7 +57,7 @@ async function load(){S=await api('/api/status');if(!S)return;
   S.tracked.map(t=>[t.addr.slice(0,10)+'…',t.name,t.score,t.precision,t.decisive,t.opens_per_day,Math.round(t.account),Math.round(t.month_pnl)]));
  $('err').innerHTML=tbl(['Время','Сообщение'],S.errors.map(e=>[tm(e.ts),e.msg]))}
 async function cmd(a){const r=await api('/api/cmd',{action:a});alert(r&&r.result||r&&r.error||'');load()}
-async function ai(){const b=$('ai');b.style.display='block';b.textContent='Запрос к ИИ…';const r=await api('/api/ai_summary',{});b.textContent=r?(r.provider?'['+r.provider+']\n':'')+r.text:''}
+async function ai(){const b=$('ai');b.style.display='block';b.textContent='Запрос к ИИ…';const r=await api('/api/ai_summary',{});b.textContent=r?(r.provider?'['+r.provider+']\\n':'')+r.text:''}
 async function st(){const b=$('st');b.style.display='block';b.textContent='Проверка хранилища, ИИ и сети (до минуты)…';const r=await api('/api/selftest',{});b.textContent=r?r.report:''}
 async function saveCfg(){try{const r=await api('/api/config',JSON.parse($('cfg').value));$('cm').textContent=r.error||'Сохранено'}catch(e){$('cm').textContent='Ошибка JSON: '+e}}
 (async()=>{const c=await api('/api/config');if(c)$('cfg').value=JSON.stringify(c,null,2);load();setInterval(load,15000)})();
