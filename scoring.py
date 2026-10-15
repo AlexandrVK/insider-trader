@@ -59,6 +59,22 @@ def _close_at(cs, t_ms):
     return closes[i]
 
 
+def _baseline(coin, side, cs, cfg, cache):
+    """Доля "верных" решающих движений при входе в случайный момент в эту же сторону: учитывает общий дрейф рынка."""
+    key = (coin, side)
+    if key not in cache:
+        k = max(1, round(cfg["hit_horizon_min"] * 60000 / CANDLE_MS))
+        closes, up, down = cs[1], 0, 0
+        for i in range(len(closes) - k):
+            m = (closes[i + k] / closes[i] - 1) * 100
+            if m >= cfg["hit_pct"]:
+                up += 1
+            elif m <= -cfg["hit_pct"]:
+                down += 1
+        cache[key] = 0.5 if up + down == 0 else (up if side == "Open Long" else down) / (up + down)
+    return cache[key]
+
+
 def score_one(c, cfg, cache):
     now_ms = int(time.time() * 1000)
     since = now_ms - cfg["lookback_days"] * 86400000
@@ -71,6 +87,7 @@ def score_one(c, cfg, cache):
     span_days = max((now_ms - min((f["time"] for f in allf), default=now_ms)) / 86400000, 0.04)
     horizon = cfg["hit_horizon_min"] * 60000
     hit = anti = 0
+    base_sum = 0.0
     for f in opens.values():
         if f["time"] + horizon > now_ms - CANDLE_MS:
             continue
@@ -83,10 +100,28 @@ def score_one(c, cfg, cache):
             hit += 1
         elif move <= -cfg["hit_pct"]:
             anti += 1
+        else:
+            continue
+        base_sum += _baseline(f["coin"], f["dir"], cs, cfg, cache)
     dec = hit + anti
+    base = base_sum / dec if dec else None
+    # score: нижняя граница Вилсона минус превышение рыночной базы над 0.5 (на растущем рынке лонги "угадывают" и так)
+    score = wilson(hit, dec) - max(0.0, base - 0.5) if dec >= cfg["min_decisive"] else 0.0
     return {**c, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
-            "precision": round(hit / dec, 3) if dec else None,
-            "score": round(wilson(hit, dec), 3) if dec >= cfg["min_decisive"] else 0.0}
+            "precision": round(hit / dec, 3) if dec else None, "baseline": round(base, 3) if dec else None,
+            "edge": round(hit / dec - base, 3) if dec else None, "score": round(score, 3)}
+
+
+def _reject(r, cfg):
+    if r.get("error"):
+        return "ошибка: " + r["error"][:80]
+    if r["opens_per_day"] > cfg["max_opens_per_day"]:
+        return f"HFT ({r['opens_per_day']} входов/день)"
+    if r["decisive"] < cfg["min_decisive"]:
+        return f"мало решающих входов ({r['decisive']}<{cfg['min_decisive']})"
+    if r["score"] < cfg["min_score"]:
+        return f"score {r['score']}<{cfg['min_score']}"
+    return None
 
 
 def build(cfg):
@@ -95,8 +130,11 @@ def build(cfg):
         try:
             scanned.append(score_one(c, cfg, cache))
         except Exception as e:
-            scanned.append({**c, "error": str(e), "score": 0.0, "decisive": 0, "opens_per_day": 0})
-        time.sleep(0.3)
-    ok = [r for r in scanned if r["score"] >= cfg["min_score"] and r["opens_per_day"] <= cfg["max_opens_per_day"]]
-    ok.sort(key=lambda r: -r["score"])
+            scanned.append({**c, "error": f"{type(e).__name__}: {e}", "score": 0.0, "decisive": 0, "opens_per_day": 0})
+        time.sleep(0.1)
+    for r in scanned:
+        r["reject"] = _reject(r, cfg)
+    ok = sorted([r for r in scanned if not r["reject"]], key=lambda r: -r["score"])
+    for r in ok[cfg["tracked_max"]:]:
+        r["reject"] = "вне топ-" + str(cfg["tracked_max"])
     return {"ts": time.time(), "tracked": ok[:cfg["tracked_max"]], "scanned": scanned}

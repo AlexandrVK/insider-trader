@@ -49,7 +49,7 @@ def build(s, cfg, version, equity, mids):
     unreal = equity - s["cash"] - 0.0
     traders = {}
     for t in s["traders"]["tracked"]:
-        traders[t["addr"]] = {"name": t.get("name"), "score": t["score"], "precision": t["precision"],
+        traders[t["addr"]] = {"name": t.get("name"), "score": t["score"], "precision": t["precision"], "baseline": t.get("baseline"), "edge": t.get("edge"),
                               "decisive": t["decisive"], "opens_per_day": t["opens_per_day"],
                               "account_usd": round(t["account"]), "month_pnl": round(t["month_pnl"]),
                               "events": 0, "trades": 0, "attributed_pnl": 0.0}
@@ -96,7 +96,9 @@ def build(s, cfg, version, equity, mids):
                     "outcomes_ai_vetoed": _signal_outcomes([g for g in s["signals"] if g["decision"] == "ai_veto"]),
                     "outcomes_opened": _signal_outcomes([g for g in s["signals"] if g["decision"] == "opened"])},
         "traders": traders,
-        "scanned_not_selected": len([t for t in s["traders"]["scanned"]]) - len(traders),
+        "scanned_candidates": [{k: t.get(k) for k in ("addr", "name", "account", "month_pnl", "opens_per_day", "decisive",
+                                                       "precision", "baseline", "edge", "score", "reject")}
+                               for t in s["traders"]["scanned"]],
         "open_positions": [{k: x[k] for k in ("coin", "side", "entry", "notional", "opened", "n_traders")} for x in s["positions"]],
         "config": cfg,
         "recent_errors": s["errors"][-20:],
