@@ -1,6 +1,6 @@
 """
 Insider Copy Trader — веб-сервис: отслеживает трейдеров Hyperliquid и копирует их входы на виртуальном (paper) счёте.
-v0.3
+v0.4
 """
 import collections
 import hashlib

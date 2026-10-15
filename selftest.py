@@ -41,10 +41,39 @@ def fake_candles(coin, s, e, interval="5m"):
 hl.candles = fake_candles
 cfg = {**__import__("config").DEFAULTS}
 r = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
-print("score:", r["decisive"], r["precision"], r["score"])
-assert r["decisive"] >= 15 and r["precision"] > 0.7 and r["score"] > 0.5
+print("score:", r["decisive"], r["precision"], r["baseline"], r["edge"], r["score"])
+assert r["decisive"] >= 15 and r["precision"] > 0.7 and r["baseline"] is not None
+
+# рынок, который только растёт: любой лонг "угадывает" -> база высокая, edge ~0, score не проходит порог
+hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": str(100 + (t - s) / 3e6)} for t in range(s - s % 300000, e, 300000)]
+r2 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
+print("trend market:", r2["precision"], r2["baseline"], r2["score"])
+assert r2["baseline"] > 0.95 and r2["score"] < 0.5
+hl.candles = fake_candles
+
+# причины отсева в build()
+good, bad, empty = ({"addr": x, "name": x, "account": 1e6, "month_pnl": 1.0, "alltime_pnl": 1.0} for x in ("0xgood", "0xbad", "0xempty"))
+scoring.candidates = lambda c: [good, bad, empty]
+def fills_by(addr):
+    if addr == "0xbad":
+        raise RuntimeError("boom")
+    return fills if addr == "0xgood" else []
+hl.fills = fills_by
+res = scoring.build(cfg)
+rej = {x["addr"]: x["reject"] for x in res["scanned"]}
+print("reject:", rej)
+assert rej["0xbad"].startswith("ошибка") and "мало" in rej["0xempty"]
+hl.fills = lambda a: fills
 
 # --- 2. engine: два трейдера открывают BTC long -> сигнал -> вход -> TP ---
+# --- 1b. ограничитель частоты: пустой бюджет 1200/мин (20/с), запрос веса 10 ждёт ~0.5 с ---
+lim = hl.Limiter(1200)
+lim.tokens = 0.0
+t_ = time.time(); lim.take(10); dt_ = time.time() - t_
+assert 0.3 < dt_ < 1.5, dt_
+lim.penalize(); assert lim.tokens < 0
+print("limiter ok", round(dt_, 2))
+
 e = Engine()
 e.cfg["ai_web"] = False
 e.state["traders"]["tracked"] = [{"addr": a, "name": "<b>x</b>", "score": .6, "precision": .8, "decisive": 20,
@@ -87,8 +116,13 @@ tick()
 assert e.state["trades"][-1]["reason"] == "traders_exit"
 
 # --- 4. аналитика и сохранение ---
-a = e.analytics("0.2")
+a = e.analytics("0.4")
 assert a["summary"]["trades"] == 2 and "by_exit_reason" in a
+import copy, analytics
+st_ = copy.deepcopy(e.state)
+st_["traders"] = res
+a = analytics.build(st_, e.cfg, "0.4", 10000.0, {})
+assert len(a["scanned_candidates"]) == 3 and a["scanned_candidates"][1]["reject"].startswith("ошибка")
 e.save(True)
 e2 = Engine()
 assert len(e2.state["trades"]) == 2
