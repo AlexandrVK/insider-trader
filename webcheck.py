@@ -47,8 +47,11 @@ def review(sig):
     log = {"queries": queries, "headlines": 0}
     try:
         for rnd in range(MAX_SEARCH_ROUNDS + 1):
+            if time.time() - t0 > BUDGET_SEC:
+                log["verdict"] = "timeout"
+                return False, "таймаут проверки", log
             can = rnd < MAX_SEARCH_ROUNDS and time.time() - t0 < BUDGET_SEC / 2
-            data = llm.ask_json(_prompt(sig, evidence, can))
+            data = llm.ask_json(_prompt(sig, evidence, can), fast=True)
             if not data:
                 log["verdict"] = "ai_unavailable"
                 return False, "ИИ недоступен", log
