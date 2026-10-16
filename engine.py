@@ -18,7 +18,8 @@ def sign(x):
 def new_state(cfg):
     return {"cash": cfg["start_equity"], "start_equity": cfg["start_equity"], "positions": [], "trades": [],
             "signals": [], "events": [], "traders": {"ts": 0, "tracked": [], "scanned": []},
-            "snap": {}, "snap_ts": {}, "curve": [], "paused": False, "halted": False,
+            "snap": {}, "snap_ts": {}, "accum": {}, "curve": [],
+            "diag": {"ticks_ok": 0, "ticks_fail": 0, "last_tick": 0, "polls": {}}, "paused": False, "halted": False,
             "day": "", "day_start_eq": cfg["start_equity"], "errors": [], "started": time.time()}
 
 
@@ -77,6 +78,8 @@ class Engine:
                 self.tick()
             except Exception as e:
                 self.err(f"tick: {e}")
+                with self.lock:
+                    self.state["diag"]["ticks_fail"] += 1
             self.stop.wait(self.cfg["poll_sec"])
 
     # ---------- отбор трейдеров ----------
@@ -114,17 +117,31 @@ class Engine:
         for a in tracked:
             try:
                 snaps[a] = hl.positions(a)
+                self.poll_stat(a, None)
             except Exception as e:
                 self.err(f"positions {a[:8]}: {e}")
+                self.poll_stat(a, e)
             time.sleep(0.15)
         with self.lock:
             self.mids = mids
             self.process(self.cfg, mids, snaps)
             pending, self.pending = self.pending, []
             self.last_tick = time.time()
+            self.state["diag"]["ticks_ok"] += 1
+            self.state["diag"]["last_tick"] = self.last_tick
             self.save()
         for item in pending:  # веб-проверка идёт в отдельном потоке, чтобы не задерживать SL/TP
             threading.Thread(target=self.review, args=item, daemon=True).start()
+
+    def poll_stat(self, addr, exc):
+        with self.lock:
+            d = self.state["diag"]["polls"].setdefault(addr, {"ok": 0, "fail": 0, "last_ok": 0, "last_err": ""})
+            if exc is None:
+                d["ok"] += 1
+                d["last_ok"] = time.time()
+            else:
+                d["fail"] += 1
+                d["last_err"] = str(exc)[:150]
 
     def review(self, sig, by, opp):
         veto, _, log = webcheck.review(sig)
@@ -140,10 +157,10 @@ class Engine:
     def process(self, cfg, mids, snaps):
         s, t = self.state, time.time()
         win = cfg["signal_window_min"] * 60
-        # 1. события: трейдер открыл/нарастил позицию
+        # 1. события: набор позиции трейдером. Приросты копятся в окне сигнала, чтобы не терять набор мелкими долями
         for a, pos in snaps.items():
             old = s["snap"].get(a)
-            fresh = t - s["snap_ts"].get(a, 0) <= cfg["poll_sec"] * 3 + 30  # после простоя - только базовый снимок
+            fresh = t - s["snap_ts"].get(a, 0) <= max(win, cfg["poll_sec"] * 3 + 30)  # после долгого простоя - только базовый снимок
             if old is not None and fresh:
                 for coin in set(pos) | set(old):
                     o = old.get(coin, {}).get("szi", 0.0)
@@ -151,11 +168,20 @@ class Engine:
                     d = n - o
                     if n and sign(d) == sign(n) and coin in mids:
                         usd = abs(n if sign(o) != sign(n) else d) * mids[coin]
-                        if usd >= cfg["event_min_usd"]:
-                            s["events"].append({"ts": t, "addr": a, "coin": coin, "usd": round(usd),
-                                                "side": "LONG" if n > 0 else "SHORT", "trader_entry": pos[coin]["entry"]})
+                        side = "LONG" if n > 0 else "SHORT"
+                        key = f"{a}|{coin}|{side}"
+                        acc = [x for x in s["accum"].get(key, []) if t - x[0] <= win] + [[t, usd]]
+                        total = sum(x[1] for x in acc)
+                        if total >= cfg["event_min_usd"]:
+                            s["events"].append({"ts": t, "addr": a, "coin": coin, "usd": round(total), "side": side,
+                                                "trader_entry": pos[coin]["entry"]})
+                            s["accum"].pop(key, None)
+                        else:
+                            s["accum"][key] = acc
             s["snap"][a] = pos
             s["snap_ts"][a] = t
+        for key in [k for k, v in s["accum"].items() if all(t - x[0] > win for x in v)]:
+            del s["accum"][key]
         s["events"] = s["events"][-500:]
         # 2. сигналы: K разных трейдеров в одну сторону по одной монете за окно
         groups = {}
@@ -275,6 +301,12 @@ class Engine:
         if action in ("pause", "resume"):
             with self.lock:
                 self.state["paused"] = action == "pause"
+                self.dirty = True
+                self.save()
+            return "ok"
+        if action == "clear_errors":
+            with self.lock:
+                self.state["errors"] = []
                 self.dirty = True
                 self.save()
             return "ok"

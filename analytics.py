@@ -66,6 +66,18 @@ def build(s, cfg, version, equity, mids):
         decisions[g["decision"]] = decisions.get(g["decision"], 0) + 1
     curve = s["curve"]
     step = max(1, len(curve) // 300)
+    now, dg = time.time(), s.get("diag", {})
+    utc = lambda ts: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts)) if ts else None
+    diagnostics = {
+        "last_tick_utc": utc(dg.get("last_tick")), "ticks_ok": dg.get("ticks_ok", 0), "ticks_fail": dg.get("ticks_fail", 0),
+        "polls": {a: {"ok": v["ok"], "fail": v["fail"], "last_ok_utc": utc(v["last_ok"]), "last_err": v["last_err"]}
+                  for a, v in dg.get("polls", {}).items()},
+        "tracked_positions": {a: {"snap_age_sec": round(now - s["snap_ts"].get(a, 0)),
+                                  "positions": {c: {"szi": p["szi"], "usd": round(abs(p["szi"]) * mids.get(c, p["entry"]))}
+                                                for c, p in pos.items()}} for a, pos in s["snap"].items()},
+        "pending_accum_usd": {k: round(sum(x[1] for x in v)) for k, v in s.get("accum", {}).items()},
+        "last_events": s["events"][-5:],
+    }
     return {
         "version": version,
         "generated_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
@@ -96,8 +108,9 @@ def build(s, cfg, version, equity, mids):
                     "outcomes_ai_vetoed": _signal_outcomes([g for g in s["signals"] if g["decision"] == "ai_veto"]),
                     "outcomes_opened": _signal_outcomes([g for g in s["signals"] if g["decision"] == "opened"])},
         "traders": traders,
+        "diagnostics": diagnostics,
         "scanned_candidates": [{k: t.get(k) for k in ("addr", "name", "account", "month_pnl", "opens_per_day", "decisive",
-                                                       "precision", "baseline", "edge", "score", "reject")}
+                                                       "turnover", "fills_n", "spot_n", "precision", "baseline", "edge", "score", "reject")}
                                for t in s["traders"]["scanned"]],
         "open_positions": [{k: x[k] for k in ("coin", "side", "entry", "notional", "opened", "n_traders")} for x in s["positions"]],
         "config": cfg,

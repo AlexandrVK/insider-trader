@@ -19,22 +19,25 @@ def wilson(h, n, z=1.96):
 def _perf(row, window):
     for name, v in row["windowPerformances"]:
         if name == window:
-            return float(v["pnl"]), float(v["roi"])
-    return 0.0, 0.0
+            return float(v["pnl"]), float(v["roi"]), float(v.get("vlm") or 0)
+    return 0.0, 0.0, 0.0
 
 
 def candidates(cfg):
     out = []
     for r in hl.leaderboard():
         acc = float(r["accountValue"])
-        all_pnl, _ = _perf(r, "allTime")
-        m_pnl, m_roi = _perf(r, "month")
+        all_pnl, _, _ = _perf(r, "allTime")
+        m_pnl, m_roi, m_vlm = _perf(r, "month")
         if acc < cfg["min_account_usd"] or all_pnl < cfg["min_alltime_pnl"]:
             continue
         if m_pnl <= 0 or m_roi < cfg["min_month_roi"]:
             continue
+        turnover = m_vlm / acc if acc else 0.0
+        if cfg["max_turnover"] and turnover > cfg["max_turnover"]:
+            continue  # маркет-мейкер/HFT: отсекаем до дорогой проверки истории
         out.append({"addr": r["ethAddress"], "name": r.get("displayName") or "", "account": acc,
-                    "month_pnl": m_pnl, "alltime_pnl": all_pnl})
+                    "month_pnl": m_pnl, "alltime_pnl": all_pnl, "turnover": round(turnover, 1)})
     out.sort(key=lambda x: -x["month_pnl"])
     return out[:cfg["scan_candidates"]]
 
@@ -78,7 +81,9 @@ def _baseline(coin, side, cs, cfg, cache):
 def score_one(c, cfg, cache):
     now_ms = int(time.time() * 1000)
     since = now_ms - cfg["lookback_days"] * 86400000
-    allf = [f for f in hl.fills(c["addr"]) if f["time"] >= since and not f["coin"].startswith("@")]
+    raw = [f for f in hl.fills(c["addr"]) if f["time"] >= since]
+    spot_n = sum(1 for f in raw if f["coin"].startswith("@"))  # спотовые сделки не учитываем, но считаем - чтобы видеть причину "нет входов"
+    allf = [f for f in raw if not f["coin"].startswith("@")]
     # частичные исполнения одного ордера (одна минута) считаем одним входом
     opens = {}
     for f in allf:
@@ -107,7 +112,7 @@ def score_one(c, cfg, cache):
     base = base_sum / dec if dec else None
     # score: нижняя граница Вилсона минус превышение рыночной базы над 0.5 (на растущем рынке лонги "угадывают" и так)
     score = wilson(hit, dec) - max(0.0, base - 0.5) if dec >= cfg["min_decisive"] else 0.0
-    return {**c, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
+    return {**c, "fills_n": len(allf), "spot_n": spot_n, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
             "precision": round(hit / dec, 3) if dec else None, "baseline": round(base, 3) if dec else None,
             "edge": round(hit / dec - base, 3) if dec else None, "score": round(score, 3)}
 
