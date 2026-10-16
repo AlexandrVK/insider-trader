@@ -1,6 +1,6 @@
 """
 Insider Copy Trader — веб-сервис: отслеживает трейдеров Hyperliquid и копирует их входы на виртуальном (paper) счёте.
-v0.4
+v0.5
 """
 import collections
 import hashlib
@@ -211,4 +211,4 @@ def ai_summary(request: Request):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=config.HOST, port=config.PORT)
+    uvicorn.run(app, host=config.HOST, port=config.PORT, use_colors=False)  # без ANSI-кодов: в консоли Windows они выглядят как мусор

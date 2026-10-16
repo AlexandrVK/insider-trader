@@ -34,7 +34,7 @@ __WARN__
 <h2>Открытые позиции</h2><div class="t" id="pos"></div>
 <h2>Последние сигналы</h2><div class="t" id="sig"></div>
 <h2>Отслеживаемые трейдеры</h2><div class="t" id="trd"></div>
-<h2>Ошибки</h2><div class="t" id="err"></div>
+<h2>Ошибки <button onclick="cmd('clear_errors')">Почистить ошибки</button></h2><div class="t" id="err"></div>
 <h2>Настройки (JSON)</h2><textarea id="cfg"></textarea><br><button onclick="saveCfg()">Сохранить настройки</button> <span id="cm"></span>
 <script>
 const $=id=>document.getElementById(id);

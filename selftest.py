@@ -44,6 +44,22 @@ r = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "
 print("score:", r["decisive"], r["precision"], r["baseline"], r["edge"], r["score"])
 assert r["decisive"] >= 15 and r["precision"] > 0.7 and r["baseline"] is not None
 
+# спотовые сделки не считаются входами, но видны в fills_n/spot_n
+fills_spot = fills + [{"coin": "@107", "dir": "Buy", "px": "1", "time": t0}]
+hl.fills = lambda a: fills_spot
+r3 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
+assert r3["spot_n"] == 1 and r3["fills_n"] == 20
+hl.fills = lambda a: fills
+
+# предфильтр по обороту: маркет-мейкер (оборот/счёт = 5000) отсекается до проверки истории
+def row(addr, vlm):
+    perf = lambda pnl, roi, v: {"pnl": pnl, "roi": roi, "vlm": v}
+    return {"ethAddress": addr, "accountValue": "1000000", "displayName": "",
+            "windowPerformances": [["day", perf("0", "0", "0")], ["month", perf("500000", "0.5", vlm)], ["allTime", perf("900000", "2", "1")]]}
+hl.leaderboard = lambda: [row("0xa", "50000000"), row("0xmm", "5000000000")]
+cands = scoring.candidates(cfg)
+assert [c["addr"] for c in cands] == ["0xa"] and cands[0]["turnover"] == 50.0
+
 # рынок, который только растёт: любой лонг "угадывает" -> база высокая, edge ~0, score не проходит порог
 hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": str(100 + (t - s) / 3e6)} for t in range(s - s % 300000, e, 300000)]
 r2 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
@@ -116,12 +132,12 @@ tick()
 assert e.state["trades"][-1]["reason"] == "traders_exit"
 
 # --- 4. аналитика и сохранение ---
-a = e.analytics("0.4")
+a = e.analytics("0.5")
 assert a["summary"]["trades"] == 2 and "by_exit_reason" in a
 import copy, analytics
 st_ = copy.deepcopy(e.state)
 st_["traders"] = res
-a = analytics.build(st_, e.cfg, "0.4", 10000.0, {})
+a = analytics.build(st_, e.cfg, "0.5", 10000.0, {})
 assert len(a["scanned_candidates"]) == 3 and a["scanned_candidates"][1]["reject"].startswith("ошибка")
 e.save(True)
 e2 = Engine()
@@ -132,6 +148,28 @@ try:
 except ValueError:
     pass
 print("engine ok")
+
+# --- 4a. накопление: два прироста по $30k дают событие только в сумме; диагностика; очистка ошибок ---
+e.cfg["ai_web"] = False
+e.state["events"].clear(); e.state["signals"].clear()
+price["BTC"] = 100000.0
+for a in (A, B):
+    pos[a] = {}
+e.tick()
+for sz in (0.3, 0.6):
+    for a in (A, B):
+        pos[a] = {"BTC": {"szi": sz, "entry": 100000.0, "lev": 5}}
+    e.tick()
+    if sz == 0.3:
+        assert not e.state["events"]
+assert len(e.state["events"]) == 2 and e.state["events"][0]["usd"] == 60000, e.state["events"]
+assert e.state["signals"][-1]["decision"] == "opened"
+dg = e.analytics("0.5")["diagnostics"]
+assert dg["ticks_ok"] >= 4 and dg["polls"][A]["ok"] >= 4 and A in dg["tracked_positions"]
+e.err("x")
+assert e.command("clear_errors") == "ok" and not e.state["errors"]
+e.command("close_all")
+print("accumulation ok")
 
 # --- 4b. веб-проверка ---
 import llm, webcheck
