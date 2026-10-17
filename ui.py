@@ -1,4 +1,4 @@
-LOGIN = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+LOGIN = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <title>Вход</title><style>body{font-family:system-ui;background:#111;color:#eee;display:flex;height:100vh;align-items:center;justify-content:center;margin:0}
 form{background:#1c1c1c;padding:24px;border-radius:8px;width:280px}input,button{width:100%;padding:10px;margin-top:10px;box-sizing:border-box;border-radius:4px;border:1px solid #444;background:#111;color:#eee}
 button{background:#2a6;border:0;cursor:pointer}.e{color:#f66;margin-top:10px}</style>
@@ -6,7 +6,7 @@ button{background:#2a6;border:0;cursor:pointer}.e{color:#f66;margin-top:10px}</s
 <input type="password" name="password" placeholder="Пароль" autofocus required>
 <button>Войти</button>__ERR__</form></html>"""
 
-PANEL = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+PANEL = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <title>Insider Copy Trader</title><style>
 body{font-family:system-ui;background:#111;color:#ddd;margin:0;padding:16px;max-width:1100px;margin:auto}
 h1{font-size:18px}h2{font-size:15px;margin:22px 0 6px;color:#9ab}
@@ -63,7 +63,7 @@ async function saveCfg(){try{const r=await api('/api/config',JSON.parse($('cfg')
 (async()=>{const c=await api('/api/config');if(c)$('cfg').value=JSON.stringify(c,null,2);load();setInterval(load,15000)})();
 </script></html>"""
 
-ERROR = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+ERROR = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <title>Ошибка запуска</title><style>body{font-family:system-ui;background:#111;color:#ddd;padding:16px;max-width:900px;margin:auto}
 pre{background:#1c1c1c;padding:10px;white-space:pre-wrap;font-size:12px}button{background:#2a3a4a;color:#fff;border:0;padding:8px 12px;border-radius:4px;cursor:pointer}</style>
 <h1>Сервис работает, но торговый движок не запустился</h1><pre>__MSG__</pre>

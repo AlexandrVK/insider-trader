@@ -1,19 +1,21 @@
 """
 Insider Copy Trader — веб-сервис: отслеживает трейдеров Hyperliquid и копирует их входы на виртуальном (paper) счёте.
-v0.5
+v0.6
 """
 import collections
 import hashlib
 import hmac
 import html
+import os
 import re
 import secrets
+import sys
 import time
 
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 import config
 import diag
@@ -97,7 +99,7 @@ app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
 @app.middleware("http")
 async def headers(request, call_next):
     r = await call_next(request)
-    r.headers["Cache-Control"] = "no-store"
+    r.headers.setdefault("Cache-Control", "no-store")
     r.headers["X-Frame-Options"] = "DENY"
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
@@ -107,6 +109,15 @@ async def headers(request, call_next):
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return PlainTextResponse("Insider trader is alive!")  # для UptimeRobot
+
+
+ICON = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='#111'/>"
+        "<path d='M5 22l7-8 5 5 10-12' fill='none' stroke='#2ecc71' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/></svg>")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(ICON, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -210,5 +221,25 @@ def ai_summary(request: Request):
     return {"provider": provider, "text": text or "ИИ недоступен (проверьте ANYMODEL_API_KEY / GROQ_API_KEY)."}
 
 
+def _enable_vt():
+    """Windows: включить обработку ANSI-кодов в консоли (иначе цвета выглядят как мусор). Иначе всегда True."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h, mode = k.GetStdHandle(-11), ctypes.c_uint32()
+        return bool(k.GetConsoleMode(h, ctypes.byref(mode)) and k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def choose_colors():
+    """Цвета логов: переменная COLORS = on / off / auto (по умолчанию). auto: терминал и поддержка ANSI."""
+    vt = _enable_vt()
+    forced = {"on": True, "1": True, "true": True, "off": False, "0": False, "false": False}.get(os.getenv("COLORS", "auto").lower())
+    return forced if forced is not None else (sys.stdout.isatty() and vt)
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host=config.HOST, port=config.PORT, use_colors=False)  # без ANSI-кодов: в консоли Windows они выглядят как мусор
+    uvicorn.run(app, host=config.HOST, port=config.PORT, use_colors=choose_colors())
