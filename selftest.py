@@ -49,16 +49,28 @@ fills_spot = fills + [{"coin": "@107", "dir": "Buy", "px": "1", "time": t0}]
 hl.fills = lambda a: fills_spot
 r3 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
 assert r3["spot_n"] == 1 and r3["fills_n"] == 20
+fills_sz = [{**f, "sz": "2"} for f in fills]
+hl.fills = lambda a: fills_sz
+assert scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})["median_open_usd"] == 200  # 100 * 2
 hl.fills = lambda a: fills
 
 # предфильтр по обороту: маркет-мейкер (оборот/счёт = 5000) отсекается до проверки истории
 def row(addr, vlm):
     perf = lambda pnl, roi, v: {"pnl": pnl, "roi": roi, "vlm": v}
     return {"ethAddress": addr, "accountValue": "1000000", "displayName": "",
-            "windowPerformances": [["day", perf("0", "0", "0")], ["month", perf("500000", "0.5", vlm)], ["allTime", perf("900000", "2", "1")]]}
+            "windowPerformances": [["day", perf("0", "0", "0")], ["month", perf("500000", "0.6", vlm)], ["allTime", perf("900000", "2", "1")]]}
 hl.leaderboard = lambda: [row("0xa", "50000000"), row("0xmm", "5000000000")]
 cands = scoring.candidates(cfg)
 assert [c["addr"] for c in cands] == ["0xa"] and cands[0]["turnover"] == 50.0
+hl.leaderboard = lambda: [row("0xa", "50000000"), row("0xidle", "0")]   # пассивный держатель (оборот 0) тоже отсекается
+assert [c["addr"] for c in scoring.candidates(cfg)] == ["0xa"]
+
+# предфильтр: пассивные (оборот < min_turnover) тоже отсекаются и попадают в SKIPPED с причиной
+hl.leaderboard = lambda: [row("0xa", "50000000"), row("0xmm", "5000000000"), row("0xidle", "0")]
+cands = scoring.candidates(cfg)
+assert [c["addr"] for c in cands] == ["0xa"]
+assert {x["addr"]: x["reason"] for x in scoring.SKIPPED}.keys() == {"0xmm", "0xidle"}
+assert any("min_turnover" in x["reason"] for x in scoring.SKIPPED)
 
 # рынок, который только растёт: любой лонг "угадывает" -> база высокая, edge ~0, score не проходит порог
 hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": str(100 + (t - s) / 3e6)} for t in range(s - s % 300000, e, 300000)]
@@ -78,7 +90,7 @@ hl.fills = fills_by
 res = scoring.build(cfg)
 rej = {x["addr"]: x["reject"] for x in res["scanned"]}
 print("reject:", rej)
-assert rej["0xbad"].startswith("ошибка") and "мало" in rej["0xempty"]
+assert rej["0xbad"].startswith("ошибка") and "нет сделок" in rej["0xempty"]
 hl.fills = lambda a: fills
 
 # --- 2. engine: два трейдера открывают BTC long -> сигнал -> вход -> TP ---
@@ -89,6 +101,15 @@ t_ = time.time(); lim.take(10); dt_ = time.time() - t_
 assert 0.3 < dt_ < 1.5, dt_
 lim.penalize(); assert lim.tokens < 0
 print("limiter ok", round(dt_, 2))
+
+# миграция: сохранённые прежние умолчания не "приклеиваются" (scan_candidates=40, max_opens_per_day=200 из старого config.json)
+import storage as _st
+_st.get_storage().save("config.json", {"scan_candidates": 40, "max_opens_per_day": 200, "signal_k": 3})
+_m = Engine()
+assert _m.cfg["scan_candidates"] == 80 and _m.cfg["max_opens_per_day"] == 400 and _m.cfg["signal_k"] == 3
+_m.set_config({"signal_k": 2})                      # после сохранения в файле остаются только отличия от умолчаний
+assert _st.get_storage().load("config.json") == {}
+print("config migration ok")
 
 e = Engine()
 e.cfg["ai_web"] = False
@@ -132,17 +153,18 @@ tick()
 assert e.state["trades"][-1]["reason"] == "traders_exit"
 
 # --- 4. аналитика и сохранение ---
-a = e.analytics("0.5")
+a = e.analytics("0.6")
 assert a["summary"]["trades"] == 2 and "by_exit_reason" in a
 import copy, analytics
 st_ = copy.deepcopy(e.state)
 st_["traders"] = res
-a = analytics.build(st_, e.cfg, "0.5", 10000.0, {})
+a = analytics.build(st_, e.cfg, "0.6", 10000.0, {})
 assert len(a["scanned_candidates"]) == 3 and a["scanned_candidates"][1]["reject"].startswith("ошибка")
 e.save(True)
 e2 = Engine()
 assert len(e2.state["trades"]) == 2
-e.set_config({"signal_k": 2, "ai_web": False})
+e.set_config({"signal_k": 2, "ai_web": False, "max_open": 7})
+assert e.store.load("config.json") == {"ai_web": False, "max_open": 7}   # только отличия от умолчаний
 try:
     e.set_config({"bogus": 1}); raise SystemExit("must fail")
 except ValueError:
@@ -164,7 +186,7 @@ for sz in (0.3, 0.6):
         assert not e.state["events"]
 assert len(e.state["events"]) == 2 and e.state["events"][0]["usd"] == 60000, e.state["events"]
 assert e.state["signals"][-1]["decision"] == "opened"
-dg = e.analytics("0.5")["diagnostics"]
+dg = e.analytics("0.6")["diagnostics"]
 assert dg["ticks_ok"] >= 4 and dg["polls"][A]["ok"] >= 4 and A in dg["tracked_positions"]
 e.err("x")
 assert e.command("clear_errors") == "ok" and not e.state["errors"]
@@ -259,9 +281,16 @@ print("diagnostics ok")
 
 # --- 5. авторизация и веб ---
 import app as appmod
+os.environ["COLORS"] = "on"; assert appmod.choose_colors() is True
+os.environ["COLORS"] = "off"; assert appmod.choose_colors() is False
+os.environ["COLORS"] = "auto"; assert appmod.choose_colors() is False   # в тесте stdout не терминал
+del os.environ["COLORS"]
 with TestClient(appmod.app) as c:
     assert c.get("/health").text.startswith("Insider")
     assert c.head("/health").status_code == 200
+    ic = c.get("/favicon.ico")                                                      # иконка доступна без входа
+    assert ic.status_code == 200 and ic.headers["content-type"].startswith("image/svg+xml") and "<svg" in ic.text
+    assert 'rel="icon"' in c.get("/login").text
     assert c.get("/", follow_redirects=False).status_code == 303
     assert c.get("/api/status").status_code == 401
     assert c.get("/analytics.json").status_code == 401
