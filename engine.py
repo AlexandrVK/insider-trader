@@ -35,8 +35,10 @@ class Engine:
         self.dirty = False
         self.pending = []
         self.mids = {}
-        self.cfg = {**config.DEFAULTS, **{k: v for k, v in (self.store.load("config.json", {}) or {}).items()
-                                           if k in config.DEFAULTS}}
+        stored = self.store.load("config.json", {}) or {}
+        # старые версии сохраняли настройки целиком и "приклеивали" прежние умолчания: такие значения игнорируем
+        self.cfg = {**config.DEFAULTS, **{k: v for k, v in stored.items()
+                                           if k in config.DEFAULTS and config.LEGACY_DEFAULTS.get(k) != v}}
         self.state = self.store.load("state.json") or new_state(self.cfg)
         for k, v in new_state(self.cfg).items():
             self.state.setdefault(k, v)
@@ -348,7 +350,8 @@ class Engine:
             raise ValueError("poll_sec не меньше 10")
         with self.lock:
             self.cfg = new
-            self.store.save("config.json", new)
+            # храним только отличия от умолчаний: новые умолчания следующих версий подхватываются сами
+            self.store.save("config.json", {k: v for k, v in new.items() if v != config.DEFAULTS[k]})
 
     # ---------- данные для страницы ----------
     def status(self):

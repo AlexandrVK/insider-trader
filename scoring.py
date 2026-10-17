@@ -1,5 +1,6 @@
 """Отбор трейдеров: лидерборд -> проверка по истории сделок -> оценка "аномальности" тайминга."""
 import math
+import statistics
 import time
 from bisect import bisect_right
 
@@ -23,8 +24,12 @@ def _perf(row, window):
     return 0.0, 0.0, 0.0
 
 
+SKIPPED = []  # кандидаты, отсеянные предфильтром по обороту (для аналитики)
+
+
 def candidates(cfg):
     out = []
+    SKIPPED.clear()
     for r in hl.leaderboard():
         acc = float(r["accountValue"])
         all_pnl, _, _ = _perf(r, "allTime")
@@ -34,8 +39,12 @@ def candidates(cfg):
         if m_pnl <= 0 or m_roi < cfg["min_month_roi"]:
             continue
         turnover = m_vlm / acc if acc else 0.0
-        if cfg["max_turnover"] and turnover > cfg["max_turnover"]:
-            continue  # маркет-мейкер/HFT: отсекаем до дорогой проверки истории
+        why = ("оборот ниже min_turnover (пассивный держатель/хранилище)" if turnover < cfg["min_turnover"] else
+               "оборот выше max_turnover (маркет-мейкер/HFT)" if cfg["max_turnover"] and turnover > cfg["max_turnover"] else None)
+        if why:  # отсекаем до дорогой проверки истории, но запоминаем - чтобы в аналитике было видно, кого и почему
+            SKIPPED.append({"addr": r["ethAddress"], "name": r.get("displayName") or "", "account": acc, "month_pnl": m_pnl,
+                            "turnover": round(turnover, 1), "reason": why})
+            continue
         out.append({"addr": r["ethAddress"], "name": r.get("displayName") or "", "account": acc,
                     "month_pnl": m_pnl, "alltime_pnl": all_pnl, "turnover": round(turnover, 1)})
     out.sort(key=lambda x: -x["month_pnl"])
@@ -112,7 +121,8 @@ def score_one(c, cfg, cache):
     base = base_sum / dec if dec else None
     # score: нижняя граница Вилсона минус превышение рыночной базы над 0.5 (на растущем рынке лонги "угадывают" и так)
     score = wilson(hit, dec) - max(0.0, base - 0.5) if dec >= cfg["min_decisive"] else 0.0
-    return {**c, "fills_n": len(allf), "spot_n": spot_n, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
+    sizes = [float(f["px"]) * float(f.get("sz", 0)) for f in opens.values()]
+    return {**c, "fills_n": len(allf), "spot_n": spot_n, "median_open_usd": round(statistics.median(sizes)) if sizes else None, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
             "precision": round(hit / dec, 3) if dec else None, "baseline": round(base, 3) if dec else None,
             "edge": round(hit / dec - base, 3) if dec else None, "score": round(score, 3)}
 
@@ -120,6 +130,8 @@ def score_one(c, cfg, cache):
 def _reject(r, cfg):
     if r.get("error"):
         return "ошибка: " + r["error"][:80]
+    if r.get("fills_n") == 0:
+        return f"нет сделок за {cfg['lookback_days']} дн."
     if r["opens_per_day"] > cfg["max_opens_per_day"]:
         return f"HFT ({r['opens_per_day']} входов/день)"
     if r["decisive"] < cfg["min_decisive"]:
@@ -142,4 +154,6 @@ def build(cfg):
     ok = sorted([r for r in scanned if not r["reject"]], key=lambda r: -r["score"])
     for r in ok[cfg["tracked_max"]:]:
         r["reject"] = "вне топ-" + str(cfg["tracked_max"])
-    return {"ts": time.time(), "tracked": ok[:cfg["tracked_max"]], "scanned": scanned}
+    skipped = sorted(SKIPPED, key=lambda x: -x["month_pnl"])
+    return {"ts": time.time(), "tracked": ok[:cfg["tracked_max"]], "scanned": scanned,
+            "skipped_total": len(skipped), "skipped": skipped[:30]}

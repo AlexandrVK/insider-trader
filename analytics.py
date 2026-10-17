@@ -110,8 +110,9 @@ def build(s, cfg, version, equity, mids):
         "traders": traders,
         "diagnostics": diagnostics,
         "scanned_candidates": [{k: t.get(k) for k in ("addr", "name", "account", "month_pnl", "opens_per_day", "decisive",
-                                                       "turnover", "fills_n", "spot_n", "precision", "baseline", "edge", "score", "reject")}
+                                                       "turnover", "fills_n", "spot_n", "median_open_usd", "precision", "baseline", "edge", "score", "reject")}
                                for t in s["traders"]["scanned"]],
+        "prefilter_skipped": {"total": s["traders"].get("skipped_total", 0), "top_by_month_pnl": s["traders"].get("skipped", [])},
         "open_positions": [{k: x[k] for k in ("coin", "side", "entry", "notional", "opened", "n_traders")} for x in s["positions"]],
         "config": cfg,
         "recent_errors": s["errors"][-20:],
