@@ -1,7 +1,17 @@
+import gzip
 import json
 import os
 
 import config
+
+
+def _enc(name, obj):
+    b = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    return gzip.compress(b, 6) if name.endswith(".gz") else b  # файлы *.gz сжимаем: меньше исходящего трафика
+
+
+def _dec(name, b):
+    return json.loads((gzip.decompress(b) if name.endswith(".gz") else b).decode("utf-8"))
 
 
 class LocalStorage:
@@ -12,14 +22,15 @@ class LocalStorage:
         p = os.path.join(config.DATA_DIR, name)
         if not os.path.exists(p):
             return default
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
+        with open(p, "rb") as f:
+            return _dec(name, f.read())
 
     def save(self, name, obj):
-        p = os.path.join(config.DATA_DIR, name)
-        with open(p + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False)
+        p, data = os.path.join(config.DATA_DIR, name), _enc(name, obj)
+        with open(p + ".tmp", "wb") as f:
+            f.write(data)
         os.replace(p + ".tmp", p)
+        return len(data)
 
 
 class S3Storage:
@@ -36,15 +47,16 @@ class S3Storage:
         from botocore.exceptions import ClientError
         try:
             r = self.s3.get_object(Bucket=config.S3_BUCKET, Key=config.S3_PREFIX + name)
-            return json.loads(r["Body"].read().decode("utf-8"))
+            return _dec(name, r["Body"].read())
         except ClientError as e:
             if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
                 return default
             raise  # любая другая ошибка - не стартуем, чтобы не затереть состояние пустым
 
     def save(self, name, obj):
-        self.s3.put_object(Bucket=config.S3_BUCKET, Key=config.S3_PREFIX + name,
-                           Body=json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+        data = _enc(name, obj)
+        self.s3.put_object(Bucket=config.S3_BUCKET, Key=config.S3_PREFIX + name, Body=data)
+        return len(data)
 
 
 def get_storage():

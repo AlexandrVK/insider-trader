@@ -121,8 +121,15 @@ def score_one(c, cfg, cache):
     base = base_sum / dec if dec else None
     # score: нижняя граница Вилсона минус превышение рыночной базы над 0.5 (на растущем рынке лонги "угадывают" и так)
     score = wilson(hit, dec) - max(0.0, base - 0.5) if dec >= cfg["min_decisive"] else 0.0
-    sizes = [float(f["px"]) * float(f.get("sz", 0)) for f in opens.values()]
-    return {**c, "fills_n": len(allf), "spot_n": spot_n, "median_open_usd": round(statistics.median(sizes)) if sizes else None, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
+    orders = {}  # реальный размер ордера: фрагменты одной минуты суммируются
+    for f in allf:
+        if f["dir"] in ("Open Long", "Open Short"):
+            k = (f["coin"], f["dir"], f["time"] // 60000)
+            orders[k] = orders.get(k, 0.0) + float(f["px"]) * float(f.get("sz", 0))
+    med = statistics.median(orders.values()) if orders else 0
+    # индивидуальный порог события: несколько типичных ордеров трейдера, но не выше общего потолка
+    event_usd = round(min(cfg["event_min_usd"], max(cfg["event_floor_usd"], cfg["event_order_mult"] * med))) if med else None
+    return {**c, "fills_n": len(allf), "spot_n": spot_n, "median_order_usd": round(med) if med else None, "event_usd": event_usd, "opens": len(opens), "opens_per_day": round(len(opens) / span_days, 1), "decisive": dec,
             "precision": round(hit / dec, 3) if dec else None, "baseline": round(base, 3) if dec else None,
             "edge": round(hit / dec - base, 3) if dec else None, "score": round(score, 3)}
 

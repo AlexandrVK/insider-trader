@@ -39,7 +39,7 @@ class Engine:
         # старые версии сохраняли настройки целиком и "приклеивали" прежние умолчания: такие значения игнорируем
         self.cfg = {**config.DEFAULTS, **{k: v for k, v in stored.items()
                                            if k in config.DEFAULTS and config.LEGACY_DEFAULTS.get(k) != v}}
-        self.state = self.store.load("state.json") or new_state(self.cfg)
+        self.state = self.store.load("state.json.gz") or self.store.load("state.json") or new_state(self.cfg)  # state.json - прежний формат
         for k, v in new_state(self.cfg).items():
             self.state.setdefault(k, v)
 
@@ -51,10 +51,12 @@ class Engine:
             self.state["errors"] = self.state["errors"][-50:]
 
     def save(self, force=False):
-        if not (force or self.dirty or time.time() - self.last_save >= 300):
+        if not (force or self.dirty or time.time() - self.last_save >= 900):
             return
         try:
-            self.store.save("state.json", self.state)
+            n = self.store.save("state.json.gz", self.state)
+            d = self.state["diag"]  # учёт исходящего трафика в хранилище: виден в аналитике
+            d["saves"], d["uploaded_bytes"], d["last_state_bytes"] = d.get("saves", 0) + 1, d.get("uploaded_bytes", 0) + n, n
             self.dirty = False
             self.last_save = time.time()
         except Exception as e:
@@ -160,7 +162,9 @@ class Engine:
         s, t = self.state, time.time()
         win = cfg["signal_window_min"] * 60
         # 1. события: набор позиции трейдером. Приросты копятся в окне сигнала, чтобы не терять набор мелкими долями
+        thr_of = {t["addr"]: t.get("event_usd") for t in s["traders"]["tracked"]}
         for a, pos in snaps.items():
+            thr = min(cfg["event_min_usd"], thr_of.get(a) or cfg["event_min_usd"])  # индивидуальный порог трейдера
             old = s["snap"].get(a)
             fresh = t - s["snap_ts"].get(a, 0) <= max(win, cfg["poll_sec"] * 3 + 30)  # после долгого простоя - только базовый снимок
             if old is not None and fresh:
@@ -174,9 +178,9 @@ class Engine:
                         key = f"{a}|{coin}|{side}"
                         acc = [x for x in s["accum"].get(key, []) if t - x[0] <= win] + [[t, usd]]
                         total = sum(x[1] for x in acc)
-                        if total >= cfg["event_min_usd"]:
+                        if total >= thr:
                             s["events"].append({"ts": t, "addr": a, "coin": coin, "usd": round(total), "side": side,
-                                                "trader_entry": pos[coin]["entry"]})
+                                                "px": mids[coin], "thr": round(thr)})
                             s["accum"].pop(key, None)
                         else:
                             s["accum"][key] = acc
@@ -270,14 +274,15 @@ class Engine:
         entry = px * (1 + sg * cfg["slippage_bps"] / 1e4)
         fee = notional * cfg["fee_bps"] / 1e4
         s["cash"] -= fee
-        tr_entry = sum(e["trader_entry"] for e in by.values()) / len(by)
+        px_event = sum(e.get("px", px) for e in by.values()) / len(by)  # цена в момент обнаружения события
         s["positions"].append({
             "id": uuid.uuid4().hex[:8], "coin": coin, "side": sig["side"], "sg": sg, "entry": entry,
             "qty": notional / entry, "notional": notional, "fee_in": fee,
             "sl": entry * (1 - sg * cfg["sl_pct"] / 100), "tp": entry * (1 + sg * cfg["tp_pct"] / 100),
             "opened": time.time(), "triggers": list(by), "n_traders": len(by),
             "latency_sec": round(time.time() - min(e["ts"] for e in by.values()), 1),
-            "vs_trader_pct": round((entry / tr_entry - 1) * 100 * sg, 3)})
+            "delay_cost_pct": round((px / px_event - 1) * 100 * sg, 3),  # >0: из-за задержки (опрос + проверка ИИ) вошли хуже
+            "ai_sec": (sig.get("ai") or {}).get("sec")})
         self.dirty = True
         return "opened"
 
@@ -293,7 +298,8 @@ class Engine:
                             "ret_pct": round(pnl / p["notional"] * 100, 3), "fees": round(p["fee_in"] + fee_out, 2),
                             "reason": why, "opened": p["opened"], "closed": time.time(), "triggers": p["triggers"],
                             "n_traders": p["n_traders"], "latency_sec": p["latency_sec"],
-                            "vs_trader_pct": p["vs_trader_pct"]})
+                            "delay_cost_pct": p["delay_cost_pct"], "ai_sec": p.get("ai_sec"),
+                            "gross": round(pnl + p["fee_in"] + fee_out, 2)})
         s["trades"] = s["trades"][-2000:]
         s["positions"].remove(p)
         self.dirty = True
@@ -361,6 +367,7 @@ class Engine:
                 "paused": s["paused"], "halted": s["halted"], "refreshing": self.refreshing,
                 "equity": round(self.equity(mids), 2), "start_equity": s["start_equity"],
                 "day_start_eq": round(s["day_start_eq"], 2), "n_trades": len(s["trades"]),
+                "fees_total": round(sum(x["fees"] for x in s["trades"]), 2),
                 "last_tick": self.last_tick, "traders_ts": s["traders"]["ts"],
                 "storage": type(self.store).__name__,
                 "positions": [{"coin": p["coin"], "side": p["side"], "entry": p["entry"], "notional": round(p["notional"]),
