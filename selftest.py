@@ -51,7 +51,12 @@ r3 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, 
 assert r3["spot_n"] == 1 and r3["fills_n"] == 20
 fills_sz = [{**f, "sz": "2"} for f in fills]
 hl.fills = lambda a: fills_sz
-assert scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})["median_open_usd"] == 200  # 100 * 2
+_r = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
+assert _r["median_order_usd"] == 200 and _r["event_usd"] == 10000          # 100 * 2; порог = max(floor 10000, 3 * 200)
+# фрагменты одной минуты суммируются в один ордер
+_frag = [{"coin": "BTC", "dir": "Open Long", "px": "100", "sz": "1", "time": t0 + i * 3600000 + j * 1000} for i in range(20) for j in range(3)]
+hl.fills = lambda a: _frag
+assert scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})["median_order_usd"] == 300
 hl.fills = lambda a: fills
 
 # предфильтр по обороту: маркет-мейкер (оборот/счёт = 5000) отсекается до проверки истории
@@ -131,6 +136,9 @@ tick()
 tr = e.state["trades"][-1]
 print("trade:", tr["reason"], tr["pnl"])
 assert tr["reason"] == "tp" and tr["pnl"] > 0 and not e.state["positions"]
+assert "vs_trader_pct" not in tr and tr["delay_cost_pct"] == 0 and abs(tr["gross"] - (tr["pnl"] + tr["fees"])) < 0.02
+# комиссия: 4.5 bps на каждую сторону от номинала 5000 = $4.50 всего; проскальзывание входит в цену
+assert abs(tr["fees"] - 5000 * 4.5e-4 * 2) < 0.2, tr["fees"]
 
 # дневной лимит / дубликат сигнала не создают вход повторно
 tick()
@@ -153,16 +161,35 @@ tick()
 assert e.state["trades"][-1]["reason"] == "traders_exit"
 
 # --- 4. аналитика и сохранение ---
-a = e.analytics("0.6")
+a = e.analytics("0.7")
 assert a["summary"]["trades"] == 2 and "by_exit_reason" in a
+sm = a["summary"]
+assert abs(sm["gross_pnl_before_fees"] - (sm["realized_pnl"] + sm["fees_total"])) < 0.05 and sm["round_trip_cost_pct"] == 0.19
+assert sm["avg_delay_cost_pct"] == 0 and "avg_vs_trader_pct" not in sm
+assert a["diagnostics"]["state_saves"] >= 1 and a["diagnostics"]["uploaded_mb"] > 0
 import copy, analytics
 st_ = copy.deepcopy(e.state)
 st_["traders"] = res
-a = analytics.build(st_, e.cfg, "0.6", 10000.0, {})
+a = analytics.build(st_, e.cfg, "0.7", 10000.0, {})
 assert len(a["scanned_candidates"]) == 3 and a["scanned_candidates"][1]["reject"].startswith("ошибка")
 e.save(True)
+assert os.path.exists(os.path.join(os.environ["DATA_DIR"], "state.json.gz"))
+with open(os.path.join(os.environ["DATA_DIR"], "state.json.gz"), "rb") as _f:
+    assert _f.read(2) == b"\x1f\x8b"                                             # действительно gzip
 e2 = Engine()
 assert len(e2.state["trades"]) == 2
+# прежний формат state.json читается, если .gz ещё нет
+os.rename(os.path.join(os.environ["DATA_DIR"], "state.json.gz"), os.path.join(os.environ["DATA_DIR"], "state.gz.bak"))
+_leg = dict(e.state); _leg["trades"] = e.state["trades"] * 2
+_st.get_storage().save("state.json", _leg)
+assert len(Engine().state["trades"]) == 4
+os.remove(os.path.join(os.environ["DATA_DIR"], "state.json"))
+os.rename(os.path.join(os.environ["DATA_DIR"], "state.gz.bak"), os.path.join(os.environ["DATA_DIR"], "state.json.gz"))
+# периодическое сохранение: не чаще раза в 15 минут, если ничего не менялось
+_n = e.state["diag"]["saves"]; e.dirty = False; e.last_save = time.time() - 600; e.save()
+assert e.state["diag"]["saves"] == _n
+e.last_save = time.time() - 1000; e.save()
+assert e.state["diag"]["saves"] == _n + 1
 e.set_config({"signal_k": 2, "ai_web": False, "max_open": 7})
 assert e.store.load("config.json") == {"ai_web": False, "max_open": 7}   # только отличия от умолчаний
 try:
@@ -186,12 +213,24 @@ for sz in (0.3, 0.6):
         assert not e.state["events"]
 assert len(e.state["events"]) == 2 and e.state["events"][0]["usd"] == 60000, e.state["events"]
 assert e.state["signals"][-1]["decision"] == "opened"
-dg = e.analytics("0.6")["diagnostics"]
+dg = e.analytics("0.7")["diagnostics"]
 assert dg["ticks_ok"] >= 4 and dg["polls"][A]["ok"] >= 4 and A in dg["tracked_positions"]
 e.err("x")
 assert e.command("clear_errors") == "ok" and not e.state["errors"]
 e.command("close_all")
 print("accumulation ok")
+
+# --- 4a2. индивидуальный порог: у A порог 15k, у B нет -> прирост $20k даёт событие только у A ---
+e.state["traders"]["tracked"][0]["event_usd"] = 15000
+e.state["events"].clear(); e.state["accum"].clear()
+for a in (A, B):
+    pos[a] = {}
+e.tick()
+for a in (A, B):
+    pos[a] = {"BTC": {"szi": 0.2, "entry": 100000.0, "lev": 5}}
+e.tick()
+assert [(x["addr"] == A, x["usd"], x["thr"]) for x in e.state["events"]] == [(True, 20000, 15000)], e.state["events"]
+print("adaptive threshold ok")
 
 # --- 4b. веб-проверка ---
 import llm, webcheck
