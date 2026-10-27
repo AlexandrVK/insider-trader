@@ -48,7 +48,7 @@ const pn=v=>({h:'<span class="'+(v>=0?'g':'x')+'">'+esc(v)+'</span>'});
 async function load(){S=await api('/api/status');if(!S)return;
  const ret=((S.equity/S.start_equity-1)*100).toFixed(2);
  const cd=[['Капитал',S.equity],['Доход, %',ret],['За сегодня',(S.equity-S.day_start_eq).toFixed(2)],['Позиций',S.positions.length],['Сделок',S.n_trades],
-  ['Трейдеров',S.tracked.length+' из '+S.scanned],['Статус',S.paused?'ПАУЗА':S.halted?'ЛИМИТ УБЫТКА':'работает'],['Последний опрос',tm(S.last_tick)],['Хранилище',S.storage]];
+  ['Трейдеров',S.tracked.length+' из '+S.scanned],['Статус',S.paused?'ПАУЗА':S.halted?'ЛИМИТ УБЫТКА':'работает'],['Последний опрос',tm(S.last_tick)],['Комиссии $',S.fees_total],['Хранилище',S.storage]];
  $('cards').innerHTML=cd.map(c=>'<div class="c"><b>'+esc(c[1])+'</b><span>'+esc(c[0])+'</span></div>').join('');
  $('bp').textContent=S.paused?'Продолжить':'Пауза';
  $('pos').innerHTML=tbl(['Монета','Сторона','Вход','Цена','Номинал $','uPnL $','Открыта'],S.positions.map(p=>[p.coin,p.side,p.entry,p.px,p.notional,pn(p.upnl),tm(p.opened)]));
@@ -60,7 +60,7 @@ async function cmd(a){const r=await api('/api/cmd',{action:a});alert(r&&r.result
 async function ai(){const b=$('ai');b.style.display='block';b.textContent='Запрос к ИИ…';const r=await api('/api/ai_summary',{});b.textContent=r?(r.provider?'['+r.provider+']\\n':'')+r.text:''}
 async function st(){const b=$('st');b.style.display='block';b.textContent='Проверка хранилища, ИИ и сети (до минуты)…';const r=await api('/api/selftest',{});b.textContent=r?r.report:''}
 async function saveCfg(){try{const r=await api('/api/config',JSON.parse($('cfg').value));$('cm').textContent=r.error||'Сохранено'}catch(e){$('cm').textContent='Ошибка JSON: '+e}}
-(async()=>{const c=await api('/api/config');if(c)$('cfg').value=JSON.stringify(c,null,2);load();setInterval(load,15000)})();
+(async()=>{const c=await api('/api/config');if(c)$('cfg').value=JSON.stringify(c,null,2);load();setInterval(()=>{if(!document.hidden)load()},30000)})();
 </script></html>"""
 
 ERROR = """<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="/favicon.ico" type="image/svg+xml">
