@@ -18,7 +18,7 @@ def sign(x):
 def new_state(cfg):
     return {"cash": cfg["start_equity"], "start_equity": cfg["start_equity"], "positions": [], "trades": [],
             "signals": [], "events": [], "traders": {"ts": 0, "tracked": [], "scanned": []},
-            "snap": {}, "snap_ts": {}, "accum": {}, "curve": [],
+            "snap": {}, "snap_ts": {}, "accum": {}, "cooldown": {}, "curve": [],
             "diag": {"ticks_ok": 0, "ticks_fail": 0, "last_tick": 0, "polls": {}}, "paused": False, "halted": False,
             "day": "", "day_start_eq": cfg["start_equity"], "errors": [], "started": time.time()}
 
@@ -176,11 +176,16 @@ class Engine:
                         usd = abs(n if sign(o) != sign(n) else d) * mids[coin]
                         side = "LONG" if n > 0 else "SHORT"
                         key = f"{a}|{coin}|{side}"
-                        acc = [x for x in s["accum"].get(key, []) if t - x[0] <= win] + [[t, usd]]
+                        fresh_now = int(sign(o) != sign(n))  # позиция была нулевой или противоположной: это новая идея, а не добор
+                        acc = [x for x in s["accum"].get(key, []) if t - x[0] <= win] + [[t, usd, fresh_now]]
                         total = sum(x[1] for x in acc)
-                        if total >= thr:
+                        pos_usd = abs(n) * mids[coin]
+                        pct = total / pos_usd * 100 if pos_usd else 100.0
+                        fresh = any(len(x) > 2 and x[2] for x in acc)
+                        if total >= thr and (fresh or pct >= cfg["event_min_pct"]):  # мелкий добор к большой позиции - не сигнал
                             s["events"].append({"ts": t, "addr": a, "coin": coin, "usd": round(total), "side": side,
-                                                "px": mids[coin], "thr": round(thr)})
+                                                "px": mids[coin], "thr": round(thr), "fresh": bool(fresh),
+                                                "add_pct": round(pct, 1), "pos_usd": round(pos_usd)})
                             s["accum"].pop(key, None)
                         else:
                             s["accum"][key] = acc
@@ -201,7 +206,9 @@ class Engine:
                 continue
             opp = len(groups.get((coin, "SHORT" if side == "LONG" else "LONG"), {}))
             sig = {"ts": t, "coin": coin, "side": side, "n": len(by), "addrs": list(by), "px": mids[coin],
-                   "usd": sum(e["usd"] for e in by.values())}
+                   "usd": sum(e["usd"] for e in by.values()),
+                   "fresh": any(e.get("fresh") for e in by.values()),  # хотя бы один трейдер открыл НОВУЮ позицию
+                   "ev": [{"a": a[:8], "usd": e["usd"], "pct": e.get("add_pct"), "fresh": e.get("fresh")} for a, e in by.items()]}
             sig["decision"] = self.precheck(cfg, sig, by, opp)
             if not sig["decision"]:
                 if cfg["ai_web"]:
@@ -260,6 +267,9 @@ class Engine:
             return "max_open"
         if opp >= len(by):
             return "conflict"
+        cd = cfg["cooldown_after_sl_hours"] * 3600
+        if cd and time.time() - s["cooldown"].get(f"{coin}|{sig['side']}", 0) < cd:
+            return "cooldown_sl"
         return None
 
     def open_pos(self, cfg, mids, sig, by):
@@ -300,6 +310,8 @@ class Engine:
                             "n_traders": p["n_traders"], "latency_sec": p["latency_sec"],
                             "delay_cost_pct": p["delay_cost_pct"], "ai_sec": p.get("ai_sec"),
                             "gross": round(pnl + p["fee_in"] + fee_out, 2)})
+        if why == "sl":
+            s["cooldown"][f"{p['coin']}|{p['side']}"] = time.time()
         s["trades"] = s["trades"][-2000:]
         s["positions"].remove(p)
         self.dirty = True

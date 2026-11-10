@@ -99,17 +99,19 @@ def score_one(c, cfg, cache):
         if f["dir"] in ("Open Long", "Open Short"):
             opens.setdefault((f["coin"], f["dir"], f["time"] // 60000), f)
     span_days = max((now_ms - min((f["time"] for f in allf), default=now_ms)) / 86400000, 0.04)
-    horizon = cfg["hit_horizon_min"] * 60000
+    horizon, delay = cfg["hit_horizon_min"] * 60000, cfg["copy_delay_min"] * 60000
     hit = anti = 0
     base_sum = 0.0
     for f in opens.values():
-        if f["time"] + horizon > now_ms - CANDLE_MS:
+        if f["time"] + delay + horizon > now_ms - CANDLE_MS:
             continue
         cs = _candles(f["coin"], since, now_ms, cache)
-        px_after = _close_at(cs, f["time"] + horizon) if cs else None
-        if px_after is None:
+        # входим не по цене трейдера, а через copy_delay_min после него (как мы): преимущество, исчезающее за минуты, не считается
+        px0 = _close_at(cs, f["time"] + delay) if cs else None
+        px1 = _close_at(cs, f["time"] + delay + horizon) if cs else None
+        if px0 is None or px1 is None:
             continue
-        move = (px_after / float(f["px"]) - 1) * 100 * (1 if f["dir"] == "Open Long" else -1)
+        move = (px1 / px0 - 1) * 100 * (1 if f["dir"] == "Open Long" else -1)
         if move >= cfg["hit_pct"]:
             hit += 1
         elif move <= -cfg["hit_pct"]:

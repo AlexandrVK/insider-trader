@@ -116,7 +116,12 @@ def build(s, cfg, version, equity, mids):
         "by_hold_time": _group(tr, _hold_bucket),
         "signals": {"total": len(s["signals"]), "by_decision": decisions, "outcomes": _signal_outcomes(s["signals"]),
                     "outcomes_ai_vetoed": _signal_outcomes([g for g in s["signals"] if g["decision"] == "ai_veto"]),
-                    "outcomes_opened": _signal_outcomes([g for g in s["signals"] if g["decision"] == "opened"])},
+                    "outcomes_opened": _signal_outcomes([g for g in s["signals"] if g["decision"] == "opened"]),
+                    # куда ушла цена после сигнала: новая позиция трейдера против добора, малый против большого события (сигналы v0.8+)
+                    "outcomes_fresh": _signal_outcomes([g for g in s["signals"] if g.get("fresh") is True]),
+                    "outcomes_add_only": _signal_outcomes([g for g in s["signals"] if g.get("fresh") is False]),
+                    "outcomes_usd_lt_100k": _signal_outcomes([g for g in s["signals"] if g["usd"] < 100000]),
+                    "outcomes_usd_ge_100k": _signal_outcomes([g for g in s["signals"] if g["usd"] >= 100000])},
         "traders": traders,
         "diagnostics": diagnostics,
         "scanned_candidates": [{k: t.get(k) for k in ("addr", "name", "account", "month_pnl", "opens_per_day", "decisive",

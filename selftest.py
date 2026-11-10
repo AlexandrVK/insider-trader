@@ -27,16 +27,17 @@ hl.mids = lambda: dict(price)
 hl.positions = lambda a: pos[a]
 
 # --- 1. scoring: 20 входов в лонг, цена через 30 мин выше на 1% (16 раз) или ниже (4 раза) ---
-fills, t0 = [], now_ms - 3 * 86400000
+fills, t0 = [], (now_ms - 3 * 86400000) // 300000 * 300000   # t0 выровнен по свече 5m
 for i in range(20):
     fills.append({"coin": "BTC", "dir": "Open Long", "px": "100", "time": t0 + i * 3600000})
 hl.fills = lambda a: fills
 def fake_candles(coin, s, e, interval="5m"):
     out = []
     for t in range(s - s % 300000, e, 300000):
-        i = (t - t0) // 3600000
+        i, m = divmod(t - t0, 3600000)
         up = i % 5 != 0  # каждый пятый вход проигрышный
-        out.append({"t": t, "c": "101.0" if up else "99.0"})
+        # первые 10 минут часа цена 100 (момент входа трейдера и наш вход через 3 мин), потом уходит на 101 / 99
+        out.append({"t": t, "c": "100.0" if m < 600000 else ("101.0" if up else "99.0")})
     return out
 hl.candles = fake_candles
 cfg = {**__import__("config").DEFAULTS}
@@ -77,8 +78,14 @@ assert [c["addr"] for c in cands] == ["0xa"]
 assert {x["addr"]: x["reason"] for x in scoring.SKIPPED}.keys() == {"0xmm", "0xidle"}
 assert any("min_turnover" in x["reason"] for x in scoring.SKIPPED)
 
+# преимущество, которое исчезает за минуты: цена прыгает в момент входа трейдера и дальше стоит -> с задержкой копирования не decisive
+hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": "100.0" if (t - t0) % 3600000 >= 3000000 else "101.0"} for t in range(s - s % 300000, e, 300000)]
+_gone = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
+assert _gone["decisive"] == 0, _gone
+hl.candles = fake_candles
+
 # рынок, который только растёт: любой лонг "угадывает" -> база высокая, edge ~0, score не проходит порог
-hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": str(100 + (t - s) / 3e6)} for t in range(s - s % 300000, e, 300000)]
+hl.candles = lambda coin, s, e, interval="5m": [{"t": t, "c": str(100 * 1.001 ** ((t - s) / 300000))} for t in range(s - s % 300000, e, 300000)]  # +0.1% за свечу
 r2 = scoring.score_one({"addr": A, "name": "x", "account": 1e6, "month_pnl": 1, "alltime_pnl": 1}, cfg, {})
 print("trend market:", r2["precision"], r2["baseline"], r2["score"])
 assert r2["baseline"] > 0.95 and r2["score"] < 0.5
@@ -161,8 +168,9 @@ tick()
 assert e.state["trades"][-1]["reason"] == "traders_exit"
 
 # --- 4. аналитика и сохранение ---
-a = e.analytics("0.7")
+a = e.analytics("0.8")
 assert a["summary"]["trades"] == 2 and "by_exit_reason" in a
+assert {"outcomes_fresh", "outcomes_add_only", "outcomes_usd_lt_100k", "outcomes_usd_ge_100k"} <= set(a["signals"])
 sm = a["summary"]
 assert abs(sm["gross_pnl_before_fees"] - (sm["realized_pnl"] + sm["fees_total"])) < 0.05 and sm["round_trip_cost_pct"] == 0.19
 assert sm["avg_delay_cost_pct"] == 0 and "avg_vs_trader_pct" not in sm
@@ -170,7 +178,7 @@ assert a["diagnostics"]["state_saves"] >= 1 and a["diagnostics"]["uploaded_mb"] 
 import copy, analytics
 st_ = copy.deepcopy(e.state)
 st_["traders"] = res
-a = analytics.build(st_, e.cfg, "0.7", 10000.0, {})
+a = analytics.build(st_, e.cfg, "0.8", 10000.0, {})
 assert len(a["scanned_candidates"]) == 3 and a["scanned_candidates"][1]["reject"].startswith("ошибка")
 e.save(True)
 assert os.path.exists(os.path.join(os.environ["DATA_DIR"], "state.json.gz"))
@@ -213,7 +221,7 @@ for sz in (0.3, 0.6):
         assert not e.state["events"]
 assert len(e.state["events"]) == 2 and e.state["events"][0]["usd"] == 60000, e.state["events"]
 assert e.state["signals"][-1]["decision"] == "opened"
-dg = e.analytics("0.7")["diagnostics"]
+dg = e.analytics("0.8")["diagnostics"]
 assert dg["ticks_ok"] >= 4 and dg["polls"][A]["ok"] >= 4 and A in dg["tracked_positions"]
 e.err("x")
 assert e.command("clear_errors") == "ok" and not e.state["errors"]
@@ -231,6 +239,53 @@ for a in (A, B):
 e.tick()
 assert [(x["addr"] == A, x["usd"], x["thr"]) for x in e.state["events"]] == [(True, 20000, 15000)], e.state["events"]
 print("adaptive threshold ok")
+
+# --- 4a3. значимость: мелкий добор к большой позиции - не событие; новая позиция - всегда; кулдаун после SL ---
+e.state["traders"]["tracked"][1]["event_usd"] = 15000
+e.state["events"].clear(); e.state["signals"].clear(); e.state["accum"].clear()
+for a in (A, B):
+    pos[a] = {}
+e.tick()
+for a in (A, B):
+    pos[a] = {"BTC": {"szi": 5.0, "entry": 100000.0, "lev": 5}}
+e.tick()                                                   # новая позиция $500k: событие (fresh)
+assert all(x["fresh"] and x["add_pct"] == 100.0 for x in e.state["events"]) and len(e.state["events"]) == 2
+e.command("close_all"); e.state["events"].clear(); e.state["signals"].clear(); e.state["accum"].clear()
+for a in (A, B):
+    pos[a] = {"BTC": {"szi": 5.2, "entry": 100000.0, "lev": 5}}
+e.tick()                                                   # +$20k = 3.8% позиции: ниже event_min_pct
+assert not e.state["events"]
+for a in (A, B):
+    pos[a] = {"BTC": {"szi": 5.6, "entry": 100000.0, "lev": 5}}
+e.tick()                                                   # накопилось $60k = 10.7% позиции
+assert len(e.state["events"]) == 2 and not e.state["events"][0]["fresh"] and e.state["events"][0]["add_pct"] == 10.7, e.state["events"]
+sg_ = e.state["signals"][-1]
+assert sg_["fresh"] is False and sg_["ev"][0]["pct"] == 10.7 and sg_["decision"] == "opened"
+e.command("close_all")
+print("significance filter ok")
+
+price["DOGE"] = 1.0
+def _dog(sz):
+    for a in (A, B):
+        pos[a] = {"DOGE": {"szi": sz, "entry": 1.0, "lev": 5}} if sz else {}
+e.state["events"].clear(); e.state["signals"].clear(); e.state["accum"].clear()
+_dog(0); e.tick(); _dog(500000.0); e.tick()
+assert e.state["signals"][-1]["decision"] == "opened"
+price["DOGE"] = 0.97                                       # -3%: стоп-лосс 2%
+e.tick()
+assert e.state["trades"][-1]["reason"] == "sl" and "DOGE|LONG" in e.state["cooldown"]
+price["DOGE"] = 1.0
+e.state["events"].clear(); e.state["signals"].clear(); e.state["accum"].clear()
+_dog(0); e.tick(); _dog(500000.0); e.tick()
+assert e.state["signals"][-1]["decision"] == "cooldown_sl", e.state["signals"][-1]
+e.cfg["cooldown_after_sl_hours"] = 0
+e.state["events"].clear(); e.state["signals"].clear(); e.state["accum"].clear()
+_dog(0); e.tick(); _dog(500000.0); e.tick()
+assert e.state["signals"][-1]["decision"] == "opened"      # 0 = кулдаун выключен
+e.cfg["cooldown_after_sl_hours"] = 4
+e.command("close_all")
+_dog(0); e.tick()
+print("cooldown ok")
 
 # --- 4b. веб-проверка ---
 import llm, webcheck
@@ -340,6 +395,7 @@ with TestClient(appmod.app) as c:
     assert c.post("/api/cmd", json={"action": "pause"}).status_code == 403          # нет X-Requested-With
     assert c.post("/api/cmd", json={"action": "pause"}, headers={"X-Requested-With": "fetch"}).json()["result"] == "ok"
     assert c.get("/analytics.json").headers["content-disposition"].startswith("attachment")
+    c.cookies.clear()                                                               # (новые httpx не заменяют, а дублируют cookie)
     c.cookies.set("session", "1.2.deadbeef")
     assert c.get("/api/status").status_code == 401                                  # подделка
     for _ in range(5):
