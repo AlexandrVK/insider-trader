@@ -231,3 +231,64 @@ def test_persistence_across_compact_s3_restart(tmp_path):
     llm2.attach_db(db2)
     assert llm2.last_provider == "Groq" and llm2.last_model == "llama-3.3-70b" and llm2.llm_ok_count == 7
     db2.close()
+
+
+@pytest.mark.asyncio
+async def test_timers_and_meta_rebalance_persist_across_restart(tmp_path):
+    from bot.engine import TradingEngine
+
+    db_path = tmp_path / "timers.db"
+    now = [1_800_000_000.0]
+    clk = lambda: now[0]
+    cfg = sim_settings(Settings())
+    cfg.storage.db_path = str(db_path)
+
+    db1 = Database(db_path)
+    fake = FakeExchange(seed=7, days=10, clock=clk)
+    eng1 = TradingEngine(cfg, db1, fake, clock=clk)
+
+    # 1) Первичный ребаланс MetaSelector + таймеры сканеров и снимка
+    w1 = eng1.meta.update_weights(regime="trend")
+    assert eng1.meta.last_rebalance_ts == now[0]
+    eng1._last_xsec_ts = now[0]
+    eng1._save_timer("timer:last_xsec_ts", now[0])
+    eng1._last_funding_scan_ts = now[0]
+    eng1._save_timer("timer:last_funding_scan_ts", now[0])
+    eng1.snapshot()
+    reb_before = db1.one("SELECT COUNT(*) AS n FROM risk_events WHERE kind='meta_rebalance'")["n"]
+    snaps_before = db1.one("SELECT COUNT(*) AS n FROM snapshots")["n"]
+    assert reb_before == 1 and snaps_before == 1
+
+    # Компактный S3-бэкап + восстановление через 10 минут
+    raw = S3SyncManager._compact_snapshot_bytes(db_path, db=db1)
+    db1.close()
+
+    now[0] += 600.0
+    restored_path = tmp_path / "timers_restored.db"
+    restored_path.write_bytes(raw)
+    db2 = Database(restored_path)
+    eng2 = TradingEngine(cfg, db2, fake, clock=clk)
+
+    # После рестарта веса и таймеры восстановлены, лишнего ребаланса и снимка нет
+    assert eng2.meta.weights == w1
+    assert eng2.pf.allocations == w1
+    assert eng2.meta.last_rebalance_ts == now[0] - 600.0
+    assert eng2._last_xsec_ts == now[0] - 600.0
+    assert eng2._last_funding_scan_ts == now[0] - 600.0
+    assert eng2._last_snapshot == now[0] - 600.0
+
+    w2 = eng2.meta.update_weights(regime="trend")
+    assert w2 == w1
+    assert db2.one("SELECT COUNT(*) AS n FROM risk_events WHERE kind='meta_rebalance'")["n"] == reb_before
+
+    eng2.snapshot()
+    assert db2.one("SELECT COUNT(*) AS n FROM snapshots")["n"] == snaps_before
+
+    # Через 3+ дня ребаланс снова срабатывает, а изменение набора стратегий сбрасывает старые веса
+    now[0] += cfg.strategies.rebalance_days * 86400.0 + 10.0
+    eng2.meta.update_weights(regime="trend")
+    assert db2.one("SELECT COUNT(*) AS n FROM risk_events WHERE kind='meta_rebalance'")["n"] == reb_before + 1
+
+    ms_changed = MetaSelector(db2, ["ema_trend", "flat"], clock=clk)
+    assert ms_changed.last_rebalance_ts == 0.0
+    db2.close()

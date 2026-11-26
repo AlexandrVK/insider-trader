@@ -1,6 +1,7 @@
 """Мета-селектор стратегий: режимы, exploration>=10%, карантин, CUSUM, Deflated Sharpe Ratio."""
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -83,6 +84,29 @@ class MetaSelector:
             for sid in self.strategy_ids
         }
         self.weights: dict[str, float] = {sid: 1.0 / len(self.strategy_ids) for sid in self.strategy_ids}
+        self._load_state()
+
+    def _load_state(self) -> None:
+        raw_ts = self.db.get_meta("meta_last_rebalance_ts")
+        raw_w = self.db.get_meta("meta_weights_json")
+        if not raw_ts or not raw_w:
+            return
+        try:
+            ts = float(raw_ts)
+            saved = json.loads(raw_w)
+        except Exception:
+            return
+        if not isinstance(saved, dict) or set(saved.keys()) != set(self.strategy_ids):
+            return
+        try:
+            parsed = {k: float(saved[k]) for k in self.strategy_ids}
+        except (TypeError, ValueError):
+            return
+        total = sum(parsed.values())
+        if total <= 0 or any(v < 0 for v in parsed.values()):
+            return
+        self.weights = {k: round(v / total, 4) for k, v in parsed.items()}
+        self.last_rebalance_ts = ts
 
     def _load_returns_by_regime(self, regime: str, lookback: int = 50) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
         reg_out: dict[str, list[float]] = {sid: [] for sid in self.strategy_ids}
@@ -103,7 +127,7 @@ class MetaSelector:
 
     def update_weights(self, regime: str = "", force: bool = False) -> dict[str, float]:
         now = self.clock()
-        if not force and self.last_rebalance_ts and (now - self.last_rebalance_ts) < self.rebalance_sec:
+        if not force and self.last_rebalance_ts and 0 <= (now - self.last_rebalance_ts) < self.rebalance_sec:
             return dict(self.weights)
 
         reg_map, all_map = self._load_returns_by_regime(regime)
@@ -185,5 +209,7 @@ class MetaSelector:
         new_w = {k: round(v / s_tot, 4) for k, v in new_w.items()}
         self.weights = new_w
         self.last_rebalance_ts = now
+        self.db.set_meta("meta_last_rebalance_ts", str(now))
+        self.db.set_meta("meta_weights_json", json.dumps(new_w, ensure_ascii=False))
         self.db.log_risk_event("meta_rebalance", {"regime": regime, "weights": new_w, "reasons": reasons}, now)
         return dict(self.weights)

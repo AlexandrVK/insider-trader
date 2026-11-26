@@ -1,4 +1,4 @@
-# Autonomous Crypto Paper-Trading Bot v2.0.8
+# Autonomous Crypto Paper-Trading Bot v2.0.9
 
 Исследовательская автономная система **виртуальной (paper)** торговли криптовалютами 24/7.
 **Реальных ордеров, торговых API-ключей и обещаний прибыли в проекте нет.** Класс `LiveExecutor` намеренно не реализован — оставлен только интерфейс `Executor`.
@@ -74,6 +74,7 @@ python -m bot remote-report  # запрос отчёта с удалённого
 ---
 
 ## История версий (Changelog)
+- **v2.0.9:** таймеры ребалансировки `MetaSelector` (`meta_last_rebalance_ts` + `meta_weights_json`), 4-часовых сканеров (`cross_sectional_momentum`, `funding_carry`) и 15-минутных снимков портфеля (`snapshots`) теперь сохраняются и восстанавливаются из SQLite/S3 между перезапусками Render (частые редеплои больше не вызывают лишние ребалансировки и внеочередные входы).
 - **v2.0.8:** обеспечена полная сохранность самообучения в SQLite и S3-бэкапе между рестартами Render: `SourceRegistry` восстанавливает накопленные `alpha/beta` Thompson Sampling из `source_evals`, `ConfidenceCalibrator` сохраняет и загружает корзины калибровки (`meta.calibrator_bins`), `LLMProvider` сохраняет и восстанавливает телеметрию ИИ (`meta.llm_stats`).
 - **v2.0.7:** исправлена ошибка экранирования кавычек в `<script>` веб-панели (`bot/web.py`), из-за которой не отрисовывались карточки, галочки технологий и таблицы (`data-feat` вместо вложенных кавычек).
 - **v2.0.6:** реализованы все технологии Этапов A, B и C (`regime_gating`, `mtf_filter` 4h, `trailing_stop` с безубытком/50% Partial TP/Chandelier, `fee_edge_filter`, `obi_filter`, `maker_first`, замкнутое самообучение `ConfidenceCalibrator` + `SourceRegistry` + фикс 7-дневного возврата CUSUM, `funding_alpha` + `funding_carry`, `cross_sectional_momentum`, `vol_targeting`, ML `MetaLabeler` на чистом `numpy`, улучшенный многооконный отбор трейдеров Hyperliquid); в веб-панель добавлены интерактивные галочки включения/выключения каждой технологии (сохраняются в БД/S3), защищённый API отчётов (`GET /api/agent/report` и `/api/agent/report.md` по `Bearer`-токену) и CLI-команда `python -m bot remote-report`.

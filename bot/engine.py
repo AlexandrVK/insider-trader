@@ -75,9 +75,10 @@ class TradingEngine:
         self.prices: dict[str, float] = {}
         self._next_poll: dict[tuple, float] = {}
         self._bar_done: dict[tuple, int] = {}
-        self._last_snapshot = 0.0
-        self._last_xsec_ts = 0.0
-        self._last_funding_scan_ts = 0.0
+        snap_row = self.db.one("SELECT MAX(ts) AS ts FROM snapshots")
+        self._last_snapshot = float(snap_row["ts"]) if (snap_row and snap_row["ts"] is not None) else 0.0
+        self._last_xsec_ts = self._load_timer("timer:last_xsec_ts")
+        self._last_funding_scan_ts = self._load_timer("timer:last_funding_scan_ts")
         self._btc_vol_scalar_val = 1.0
         self._btc_annual_vol = 0.0
         self._last_regime = ""
@@ -97,6 +98,18 @@ class TradingEngine:
         self.last_cycle_ts = 0.0
         self._load_features()
         self.reconcile()
+
+    def _load_timer(self, key: str) -> float:
+        raw = self.db.get_meta(key)
+        if not raw:
+            return 0.0
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _save_timer(self, key: str, ts: float) -> None:
+        self.db.set_meta(key, str(float(ts)))
 
     def _load_features(self) -> None:
         raw = self.db.get_meta("features_json")
@@ -473,13 +486,14 @@ class TradingEngine:
             return
         if "cross_sectional_momentum" not in self.cfg.strategies.enabled:
             return
-        if now - self._last_xsec_ts < 4 * 3600:
+        if self._last_xsec_ts and 0 <= (now - self._last_xsec_ts) < 4 * 3600:
             return
         tf = self.cfg.strategies.timeframe
         btc_cs = self.md.closed_candles("BTC/USDT", tf, 30)
         if len(btc_cs) < 25:
             return
         self._last_xsec_ts = now
+        self._save_timer("timer:last_xsec_ts", now)
         btc_ret = btc_cs[-1].c / btc_cs[-25].c - 1.0
         scored: list[tuple[float, str, float]] = []
         for sym in self.universe.symbols:
@@ -530,9 +544,10 @@ class TradingEngine:
             return
         if "funding_carry" not in self.cfg.strategies.enabled:
             return
-        if now - self._last_funding_scan_ts < 4 * 3600:
+        if self._last_funding_scan_ts and 0 <= (now - self._last_funding_scan_ts) < 4 * 3600:
             return
         self._last_funding_scan_ts = now
+        self._save_timer("timer:last_funding_scan_ts", now)
         tf = self.cfg.strategies.timeframe
         for sym in self.universe.symbols[:8]:
             perp = self.hub.perp_symbol(sym)
@@ -702,7 +717,7 @@ class TradingEngine:
 
     def snapshot(self, force: bool = False) -> None:
         now = self.clock()
-        if not force and now - self._last_snapshot < self.cfg.monitoring.snapshot_minutes * 60:
+        if not force and self._last_snapshot and 0 <= (now - self._last_snapshot) < self.cfg.monitoring.snapshot_minutes * 60:
             return
         eq = self.equity()
         self.db.execute("INSERT OR REPLACE INTO snapshots (ts, equity, cash, exposure, drawdown, strategy_pnl_json) VALUES (?,?,?,?,?,?)",
