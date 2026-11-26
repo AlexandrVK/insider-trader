@@ -98,6 +98,36 @@ class LLMProvider:
         self.last_model: str = ""
         self.llm_ok_count: int = 0
         self.llm_fail_count: int = 0
+        self._db = None
+
+    def attach_db(self, db) -> None:
+        """Подключает SQLite для сохранения/восстановления телеметрии LLM между рестартами."""
+        self._db = db
+        raw = db.get_meta("llm_stats")
+        if not raw:
+            return
+        try:
+            d = json.loads(raw)
+        except Exception:
+            return
+        if isinstance(d, dict):
+            self.last_provider = str(d.get("last_provider", ""))
+            self.last_model = str(d.get("last_model", ""))
+            self.llm_ok_count = int(d.get("llm_ok", 0) or 0)
+            self.llm_fail_count = int(d.get("llm_fail", 0) or 0)
+
+    def _save_stats(self) -> None:
+        if self._db is None:
+            return
+        try:
+            self._db.set_meta("llm_stats", json.dumps({
+                "last_provider": self.last_provider,
+                "last_model": self.last_model,
+                "llm_ok": self.llm_ok_count,
+                "llm_fail": self.llm_fail_count,
+            }, ensure_ascii=False))
+        except Exception:
+            pass
 
     def _groq_models(self, client) -> list[str]:
         """Список активных чат-моделей Groq (кэш на 1 час, сортировка по GROQ_PREFERRED, без GROQ_SKIP)."""
@@ -145,6 +175,7 @@ class LLMProvider:
         self.last_provider = provider_name
         self.last_model = model
         self.llm_ok_count += 1
+        self._save_stats()
         return data
 
     def ask_json(self, prompt: str, cache_key: Optional[str] = None) -> Optional[dict]:
@@ -210,6 +241,7 @@ class LLMProvider:
                     log.warning("OpenRouter (%s) не сработал: %s", model, str(e)[:150])
 
         self.llm_fail_count += 1
+        self._save_stats()
         return None
 
 

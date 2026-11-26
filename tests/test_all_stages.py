@@ -1,6 +1,6 @@
 import pytest
 
-from bot.analysis.ai import AIAnalystSuite, local_lexicon_sentiment
+from bot.analysis.ai import AIAnalystSuite, LLMProvider, local_lexicon_sentiment
 from bot.backtest.walkforward import run_backtest, walk_forward_validate
 from bot.config import Settings
 from bot.copytrading.hyperliquid import HyperliquidCopySource, _iter_leaderboard_rows, wilson_lower_bound
@@ -187,3 +187,47 @@ async def test_stages_abc_risk_maker_and_meta_labeler(tmp_path):
     assert p_good > 0.7 and sc_good > 0.8
     assert p_bad < 0.3 and sc_bad == 0.0
     db.close()
+
+
+def test_persistence_across_compact_s3_restart(tmp_path):
+    db_path = tmp_path / "live.db"
+    db1 = Database(db_path)
+    # 1) Галочки технологий
+    db1.set_meta("features_json", '{"regime_gating": false, "meta_labeling": true}')
+    # 2) Калибратор уверенности
+    cal1 = ConfidenceCalibrator()
+    for _ in range(8):
+        cal1.record(0.72, True)
+    cal1.save_to_db(db1)
+    # 3) Thompson Sampling источников
+    reg1 = SourceRegistry(db1)
+    reg1.register_defaults()
+    for _ in range(5):
+        reg1.record_outcome("coindesk_rss", "BTC/USDT", 1, 60, 2.0, 0.5)
+    # 4) Телеметрия LLM
+    llm1 = LLMProvider()
+    llm1.attach_db(db1)
+    llm1.last_provider, llm1.last_model, llm1.llm_ok_count = "Groq", "llama-3.3-70b", 7
+    llm1._save_stats()
+
+    # Имитируем компактный S3-бэкап + восстановление в новую чистую БД после рестарта Render
+    raw = S3SyncManager._compact_snapshot_bytes(db_path, db=db1)
+    db1.close()
+
+    restored_path = tmp_path / "restored.db"
+    restored_path.write_bytes(raw)
+    db2 = Database(restored_path)
+
+    assert '"regime_gating": false' in (db2.get_meta("features_json") or "")
+    cal2 = ConfidenceCalibrator()
+    cal2.load_from_db(db2)
+    assert cal2.calibrate(0.72) > 0.65
+
+    reg2 = SourceRegistry(db2)
+    reg2.register_defaults()
+    assert reg2.sources["coindesk_rss"].alpha == 7.0  # 2.0 prior + 5 hits
+
+    llm2 = LLMProvider()
+    llm2.attach_db(db2)
+    assert llm2.last_provider == "Groq" and llm2.last_model == "llama-3.3-70b" and llm2.llm_ok_count == 7
+    db2.close()

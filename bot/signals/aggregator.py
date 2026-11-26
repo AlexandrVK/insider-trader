@@ -1,6 +1,7 @@
 """Агрегатор сигналов с калибровкой уверенности по реальной истории точности."""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from ..analysis.ai import AnalystSignal
@@ -17,7 +18,29 @@ class ConfidenceCalibrator:
         return min(9, max(0, int(conf * 10)))
 
     def record(self, raw_conf: float, hit: bool) -> None:
-        self._bins.setdefault(self._bin(raw_conf), []).append(1 if hit else 0)
+        bucket = self._bins.setdefault(self._bin(raw_conf), [])
+        bucket.append(1 if hit else 0)
+        if len(bucket) > 500:
+            del bucket[:-500]
+
+    def save_to_db(self, db) -> None:
+        payload = {str(k): v[-500:] for k, v in self._bins.items()}
+        db.set_meta("calibrator_bins", json.dumps(payload))
+
+    def load_from_db(self, db) -> None:
+        raw = db.get_meta("calibrator_bins")
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return
+        if isinstance(data, dict):
+            self._bins = {
+                int(k): [1 if int(x) else 0 for x in v][-500:]
+                for k, v in data.items()
+                if str(k).isdigit() and isinstance(v, list)
+            }
 
     def calibrate(self, raw_conf: float) -> float:
         obs = self._bins.get(self._bin(raw_conf), [])

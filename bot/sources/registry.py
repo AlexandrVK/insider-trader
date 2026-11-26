@@ -55,6 +55,22 @@ class SourceRegistry:
             SourceSpec("hyperliquid_copy", "copytrading", 100, "Public info & leaderboard API"),
         ):
             self.register(s)
+        self.load_from_db()
+
+    def load_from_db(self) -> None:
+        """Восстанавливает накопленные параметры Thompson Sampling (alpha/beta) из source_evals после рестарта."""
+        rows = self.db.query(
+            "SELECT source_id, SUM(CASE WHEN hit=1 THEN 1 ELSE 0 END) AS hits, COUNT(*) AS total "
+            "FROM source_evals GROUP BY source_id"
+        )
+        for r in rows:
+            s = self.sources.get(r["source_id"])
+            if not s:
+                continue
+            hits = float(r["hits"] or 0)
+            total = float(r["total"] or 0)
+            s.alpha = 2.0 + hits
+            s.beta = 2.0 + max(0.0, total - hits)
 
     def can_request(self, source_id: str) -> bool:
         s = self.sources.get(source_id)

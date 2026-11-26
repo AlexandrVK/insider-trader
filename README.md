@@ -1,4 +1,4 @@
-# Autonomous Crypto Paper-Trading Bot v2.0.7
+# Autonomous Crypto Paper-Trading Bot v2.0.8
 
 Исследовательская автономная система **виртуальной (paper)** торговли криптовалютами 24/7.
 **Реальных ордеров, торговых API-ключей и обещаний прибыли в проекте нет.** Класс `LiveExecutor` намеренно не реализован — оставлен только интерфейс `Executor`.
@@ -74,6 +74,7 @@ python -m bot remote-report  # запрос отчёта с удалённого
 ---
 
 ## История версий (Changelog)
+- **v2.0.8:** обеспечена полная сохранность самообучения в SQLite и S3-бэкапе между рестартами Render: `SourceRegistry` восстанавливает накопленные `alpha/beta` Thompson Sampling из `source_evals`, `ConfidenceCalibrator` сохраняет и загружает корзины калибровки (`meta.calibrator_bins`), `LLMProvider` сохраняет и восстанавливает телеметрию ИИ (`meta.llm_stats`).
 - **v2.0.7:** исправлена ошибка экранирования кавычек в `<script>` веб-панели (`bot/web.py`), из-за которой не отрисовывались карточки, галочки технологий и таблицы (`data-feat` вместо вложенных кавычек).
 - **v2.0.6:** реализованы все технологии Этапов A, B и C (`regime_gating`, `mtf_filter` 4h, `trailing_stop` с безубытком/50% Partial TP/Chandelier, `fee_edge_filter`, `obi_filter`, `maker_first`, замкнутое самообучение `ConfidenceCalibrator` + `SourceRegistry` + фикс 7-дневного возврата CUSUM, `funding_alpha` + `funding_carry`, `cross_sectional_momentum`, `vol_targeting`, ML `MetaLabeler` на чистом `numpy`, улучшенный многооконный отбор трейдеров Hyperliquid); в веб-панель добавлены интерактивные галочки включения/выключения каждой технологии (сохраняются в БД/S3), защищённый API отчётов (`GET /api/agent/report` и `/api/agent/report.md` по `Bearer`-токену) и CLI-команда `python -m bot remote-report`.
 - **v2.0.5:** оптимизация исходящего трафика на Render: из S3-бэкапа `bot.db.gz` исключён публичный кэш свечей `candles` (сжатие `VACUUM` + `gzip -9`), добавлен пропуск повторной выгрузки неизменённой БД (SHA-256), интервал авто-бэкапа увеличен с 15 до 60 минут, добавлена автоподрезка кэша свечей в локальной БД (до 600 последних на пару/таймфрейм).

@@ -58,8 +58,11 @@ class TradingEngine:
         self.sources = SourceRegistry(db, clock=clock)
         self.sources.register_defaults()
         self.llm = LLMProvider(cache_ttl_sec=cfg.ai.cache_ttl_sec) if cfg.ai.enabled else None
+        if self.llm is not None:
+            self.llm.attach_db(db)
         self.ai_suite = AIAnalystSuite(self.llm)
         self.aggregator = SignalAggregator()
+        self.aggregator.calibrator.load_from_db(db)
         self.copy_source = (
             HyperliquidCopySource(cfg.copytrading.tracked_max, cfg.copytrading.min_score, cfg.copytrading.copy_delay_min)
             if cfg.copytrading.enabled else None
@@ -129,6 +132,7 @@ class TradingEngine:
             )
         if name == "ai_review" and enabled and self.llm is None:
             self.llm = LLMProvider(cache_ttl_sec=self.cfg.ai.cache_ttl_sec)
+            self.llm.attach_db(self.db)
             self.ai_suite = AIAnalystSuite(self.llm)
         return state
 
@@ -403,6 +407,7 @@ class TradingEngine:
         raw_conf = float(sig_blob.get("confidence", 0.5))
         if not sig_blob.get("benchmark"):
             self.aggregator.calibrator.record(raw_conf, pos.realized_pnl > 0)
+            self.aggregator.calibrator.save_to_db(self.db)
             sources = json.loads(bet_row.get("source_ids_json") or "[]")
             pos_ret_pct = (exit_px / pos.entry_px - 1.0) * 100.0 if pos.entry_px else 0.0
             btc_cs = self.md.closed_candles("BTC/USDT", self.cfg.strategies.timeframe, 48)
