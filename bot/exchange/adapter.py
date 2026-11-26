@@ -1,6 +1,7 @@
 """Единый интерфейс биржи + реализация поверх ccxt (async). Только публичные рыночные данные: ключи не нужны."""
 from __future__ import annotations
 
+import gc
 import time
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -94,7 +95,18 @@ class CcxtAdapter(ExchangeAdapter):
             raise _classify(e) from e
 
     async def load_markets(self) -> dict:
-        self.markets = await self._call("load_markets")
+        markets = await self._call("load_markets")
+        # Освобождаем тяжёлые сырые JSON-поля info (экономят десятки МБ RAM на Render)
+        for m in markets.values():
+            if isinstance(m, dict) and m.get("info"):
+                m["info"] = {}
+        cur = getattr(self._ex, "currencies", None)
+        if isinstance(cur, dict):
+            for c in cur.values():
+                if isinstance(c, dict) and c.get("info"):
+                    c["info"] = {}
+        self.markets = markets
+        gc.collect()
         return self.markets
 
     async def fetch_ohlcv(self, symbol, timeframe, since=None, limit=500):
@@ -104,7 +116,11 @@ class CcxtAdapter(ExchangeAdapter):
     async def fetch_order_book(self, symbol, limit=50):
         ob = await self._call("fetch_order_book", symbol, limit)
         ts = (ob.get("timestamp") or time.time() * 1000) / 1000
-        return OrderBook(ts, [(float(p), float(q)) for p, q in ob["bids"]], [(float(p), float(q)) for p, q in ob["asks"]])
+        return OrderBook(
+            ts,
+            [(float(x[0]), float(x[1])) for x in ob["bids"]],
+            [(float(x[0]), float(x[1])) for x in ob["asks"]],
+        )
 
     @staticmethod
     def _ticker(symbol: str, t: dict) -> Ticker:
@@ -134,3 +150,11 @@ class CcxtAdapter(ExchangeAdapter):
             await self._ex.close()
         except Exception:
             pass
+        finally:
+            self.markets = {}
+            for attr in ("markets", "markets_by_id", "currencies", "currencies_by_id", "symbols", "ids"):
+                if hasattr(self._ex, attr):
+                    try:
+                        setattr(self._ex, attr, None)
+                    except Exception:
+                        pass

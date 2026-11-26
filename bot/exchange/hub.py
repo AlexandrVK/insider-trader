@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import time
@@ -161,24 +162,41 @@ async def probe_exchange(adapter: ExchangeAdapter, symbol: str = "BTC/USDT", tim
 
 async def autoselect(factory: Callable[[str], ExchangeAdapter], candidates: list[str], symbol: str = "BTC/USDT",
                      timeout_s: float = 20.0, min_backups: int = 1, cooldown_s: float = 60.0,
-                     on_event: Optional[Callable[[str, dict], None]] = None) -> tuple[ExchangeHub, list[ProbeResult]]:
-    adapters = []
+                     on_event: Optional[Callable[[str, dict], None]] = None,
+                     stop_early: bool = False) -> tuple[ExchangeHub, list[ProbeResult]]:
+    keep_n = 1 + max(0, min_backups)
+    results: list[ProbeResult] = []
+    kept: list[tuple[ProbeResult, ExchangeAdapter]] = []
+
+    # Последовательный опрос по одной бирже с немедленным освобождением памяти (критично для Render 512 MB)
     for c in candidates:
         try:
-            adapters.append(factory(c))
+            a = factory(c)
         except Exception:
-            pass
-    results = await asyncio.gather(*(probe_exchange(a, symbol, timeout_s) for a in adapters))
-    good = sorted([(r, a) for r, a in zip(results, adapters) if r.ok], key=lambda ra: -ra[0].score)
-    for r, a in zip(results, adapters):
+            continue
+        r = await probe_exchange(a, symbol, timeout_s)
+        results.append(r)
         if not r.ok:
             await a.close()
-    if not good:
+            del a
+            gc.collect()
+            continue
+
+        kept.append((r, a))
+        kept.sort(key=lambda ra: -ra[0].score)
+        while len(kept) > keep_n:
+            _, dropped = kept.pop()
+            await dropped.close()
+            del dropped
+            gc.collect()
+
+        if stop_early and len(kept) >= keep_n and kept[0][0].has_perp:
+            break
+
+    if not kept:
         raise NoExchangeAvailable("ни одна биржа не прошла пробу: " + "; ".join(f"{r.id}: {r.reason}" for r in results))
-    keep = good[:1 + max(0, min_backups)]
-    for _, a in good[len(keep):]:
-        await a.close()
-    return ExchangeHub([a for _, a in keep], cooldown_s=cooldown_s, on_event=on_event), results
+    gc.collect()
+    return ExchangeHub([a for _, a in kept], cooldown_s=cooldown_s, on_event=on_event), results
 
 
 def probe_summary(results: list[ProbeResult]) -> str:

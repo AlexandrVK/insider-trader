@@ -4,5 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+ENV MALLOC_ARENA_MAX=2
 EXPOSE 8080
 CMD ["python", "-m", "bot", "run"]

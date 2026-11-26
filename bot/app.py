@@ -34,7 +34,8 @@ async def build_hub(cfg: Settings, db: Database, stop: asyncio.Event,
     while not stop.is_set():
         try:
             hub, results = await autoselect(factory, cfg.exchange.candidates, cfg.exchange.probe_symbol, cfg.exchange.timeout_s * 1.5,
-                                            cfg.exchange.min_backups, on_event=lambda k, d: db.log_risk_event(k, d))
+                                            cfg.exchange.min_backups, on_event=lambda k, d: db.log_risk_event(k, d),
+                                            stop_early=is_render())
             if cfg.exchange.primary != "auto" and not hub.set_primary(cfg.exchange.primary):
                 log.warning("заданная primary-биржа не прошла пробу, используется лучшая")
             db.set_meta("exchange_probe", probe_summary(results))

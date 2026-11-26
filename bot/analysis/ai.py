@@ -149,6 +149,11 @@ class LLMProvider:
 
     def ask_json(self, prompt: str, cache_key: Optional[str] = None) -> Optional[dict]:
         now = time.time()
+        # Очищаем просроченный кэш, чтобы память не росла бесконечно при работе 24/7
+        if len(self._cache) > 100:
+            self._cache = {k: v for k, v in self._cache.items() if now - v[0] < self.cache_ttl_sec}
+            if len(self._cache) > 200:
+                self._cache = dict(sorted(self._cache.items(), key=lambda kv: kv[1][0])[-150:])
         if cache_key and cache_key in self._cache:
             ts, data = self._cache[cache_key]
             if now - ts < self.cache_ttl_sec:

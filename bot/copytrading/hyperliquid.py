@@ -1,10 +1,14 @@
 """Копитрейдинг (Этап 5): CopySource и Hyperliquid public API (адаптировано из insider-trade)."""
 from __future__ import annotations
 
+import codecs
+import gc
+import json
 import math
 import threading
 import time
 from abc import ABC, abstractmethod
+from typing import Iterable, Iterator
 
 import requests
 
@@ -40,6 +44,61 @@ class RateLimiter:
             time.sleep(min(wait, 2.0))
 
 
+def _iter_leaderboard_rows(chunks: Iterable[bytes]) -> Iterator[dict]:
+    """Потоковый парсер массива leaderboardRows (файл ~40 МБ) без загрузки всех 45k+ записей в RAM."""
+    dec = json.JSONDecoder()
+    utf8 = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+    buf = ""
+    in_rows = False
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buf += utf8.decode(chunk, final=False)
+        if not in_rows:
+            idx = buf.find('"leaderboardRows"')
+            if idx == -1:
+                buf = buf[-64:]
+                continue
+            br = buf.find("[", idx)
+            if br == -1:
+                continue
+            buf = buf[br + 1:]
+            in_rows = True
+        pos = 0
+        n = len(buf)
+        while pos < n:
+            while pos < n and buf[pos] in " \r\n\t,":
+                pos += 1
+            if pos >= n:
+                break
+            if buf[pos] == "]":
+                return
+            try:
+                row, end = dec.raw_decode(buf, pos)
+            except json.JSONDecodeError:
+                break
+            pos = end
+            if isinstance(row, dict):
+                yield row
+        buf = buf[pos:]
+    tail = utf8.decode(b"", final=True)
+    if in_rows and (buf or tail):
+        buf += tail
+        pos, n = 0, len(buf)
+        while pos < n:
+            while pos < n and buf[pos] in " \r\n\t,":
+                pos += 1
+            if pos >= n or buf[pos] == "]":
+                break
+            try:
+                row, end = dec.raw_decode(buf, pos)
+            except json.JSONDecodeError:
+                break
+            pos = end
+            if isinstance(row, dict):
+                yield row
+
+
 class CopySource(ABC):
     @abstractmethod
     def refresh_traders(self) -> list[dict]: ...
@@ -68,24 +127,25 @@ class HyperliquidCopySource(CopySource):
         return max(0.0, round(wilson_lower_bound(hits, total) - max(0.0, market_baseline - 0.5), 4))
 
     def refresh_traders(self) -> list[dict]:
-        r = self.session.get(LEADERBOARD_URL, timeout=15)
-        r.raise_for_status()
-        rows = r.json().get("leaderboardRows", [])
         cands = []
-        for row in rows:
-            acc = float(row.get("accountValue") or 0)
-            if acc < 50_000:
-                continue
-            m_pnl, m_roi, m_vlm = 0.0, 0.0, 0.0
-            for w_name, vals in row.get("windowPerformances", []):
-                if w_name == "month":
-                    m_pnl, m_roi, m_vlm = float(vals["pnl"]), float(vals["roi"]), float(vals.get("vlm") or 0)
-            turnover = m_vlm / acc if acc else 0.0
-            if m_pnl <= 0 or m_roi < 0.05 or turnover < 1.0 or turnover > 1500.0:
-                continue
-            cands.append({"addr": row["ethAddress"], "account": acc, "month_pnl": m_pnl, "turnover": round(turnover, 1)})
+        with self.session.get(LEADERBOARD_URL, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            for row in _iter_leaderboard_rows(r.iter_content(chunk_size=65536)):
+                acc = float(row.get("accountValue") or 0)
+                if acc < 50_000:
+                    continue
+                m_pnl, m_roi, m_vlm = 0.0, 0.0, 0.0
+                for w_name, vals in row.get("windowPerformances", []):
+                    if w_name == "month":
+                        m_pnl, m_roi, m_vlm = float(vals["pnl"]), float(vals["roi"]), float(vals.get("vlm") or 0)
+                turnover = m_vlm / acc if acc else 0.0
+                if m_pnl <= 0 or m_roi < 0.05 or turnover < 1.0 or turnover > 1500.0:
+                    continue
+                cands.append({"addr": row["ethAddress"], "account": acc, "month_pnl": m_pnl, "turnover": round(turnover, 1)})
         cands.sort(key=lambda x: -x["month_pnl"])
         self.tracked = cands[: self.tracked_max]
+        del cands
+        gc.collect()
         return self.tracked
 
     def fetch_positions(self, addr: str) -> dict[str, float]:

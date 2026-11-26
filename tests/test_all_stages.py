@@ -3,7 +3,7 @@ import pytest
 from bot.analysis.ai import AIAnalystSuite, local_lexicon_sentiment
 from bot.backtest.walkforward import run_backtest, walk_forward_validate
 from bot.config import Settings
-from bot.copytrading.hyperliquid import HyperliquidCopySource, wilson_lower_bound
+from bot.copytrading.hyperliquid import HyperliquidCopySource, _iter_leaderboard_rows, wilson_lower_bound
 from bot.db import Database
 from bot.exchange.fake import FakeExchange
 from bot.market.indicators import bollinger, detect_regime, macd, rsi
@@ -90,6 +90,10 @@ def test_stage5_copytrading_scoring():
     src = HyperliquidCopySource()
     assert src.score_trader_history(18, 20, market_baseline=0.5) > 0.6
     assert src.score_trader_history(18, 20, market_baseline=0.95) < 0.35
+    payload = b'{"leaderboardRows":[{"ethAddress":"0x1","accountValue":"100000"},{"ethAddress":"0x2","accountValue":"250000"}]}'
+    chunks = [payload[i:i + 17] for i in range(0, len(payload), 17)]
+    rows = list(_iter_leaderboard_rows(chunks))
+    assert [r["ethAddress"] for r in rows] == ["0x1", "0x2"]
 
 
 def test_stage6_verdict_thresholds():

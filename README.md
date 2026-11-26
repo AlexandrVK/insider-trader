@@ -1,4 +1,4 @@
-# Autonomous Crypto Paper-Trading Bot v2.0.3
+# Autonomous Crypto Paper-Trading Bot v2.0.4
 
 Исследовательская автономная система **виртуальной (paper)** торговли криптовалютами 24/7.
 **Реальных ордеров, торговых API-ключей и обещаний прибыли в проекте нет.** Класс `LiveExecutor` намеренно не реализован — оставлен только интерфейс `Executor`.
@@ -68,6 +68,7 @@ python -m bot.report      # генерация отчёта (MD, HTML, CSV)
 ---
 
 ## История версий (Changelog)
+- **v2.0.4:** крупная оптимизация потребления RAM под лимит Render 512 MB: последовательный опрос бирж в `autoselect` с немедленным освобождением памяти и ранней остановкой на Render (`stop_early`), очистка тяжёлых сырых `info`-словарей рынков `ccxt`, потоковый JSON-парсер лидерборда Hyperliquid (~40 МБ без пика RAM), ограничение кэша SQLite и LLM, `MALLOC_ARENA_MAX=2` в `Dockerfile`, удаление неиспользуемого `matplotlib`; также исправлена распаковка 3-колоночного стакана для OKX и Kraken.
 - **v2.0.3:** исправлен `.gitignore` (`/data/`, `/logs/`, `/reports/` вместо `data/`), чтобы пакет `bot/data/` (`news.py`, `onchain.py`) корректно попадал в Git и деплой на Render; добавлен `.gitattributes` (`*.bat text eol=crlf`) для сохранения CRLF в `Start.bat`.
 - **v2.0.2:** исправлен `AttributeError` (`eng.llm` при `eng is None`) в `bot/app.py` при открытии веб-панели во время стартового подбора биржи.
 - **v2.0.1:** отключён запрос пароля при локальном запуске; на Render вместо Basic Auth добавлена страница `/login` с одним полем пароля (без логина) и cookie-сессией; в `analytics.json` и на веб-панель добавлена телеметрия ИИ (`last_provider`, `last_model`, счётчик ответов); обновлён `README.md` с полным описанием алгоритма.

@@ -66,6 +66,8 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA cache_size=-4000")
+            self._conn.execute("PRAGMA wal_autocheckpoint=200")
         self.migrate()
 
     def migrate(self) -> None:
