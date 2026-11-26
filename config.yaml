@@ -1,0 +1,114 @@
+mode: paper
+
+capital:
+  initial_usdt: 10000.0
+
+exchange:
+  candidates: ["bybit", "okx", "binance", "kucoin", "gate", "kraken"]
+  primary: "auto"
+  timeout_s: 15.0
+  probe_symbol: "BTC/USDT"
+  use_websocket: false
+  min_backups: 1
+
+universe:
+  quote: "USDT"
+  size: 12
+  min_quote_volume_usd: 20000000.0
+  max_spread_bps: 8.0
+  min_depth_usd: 50000.0
+  min_history_days: 90
+  refresh_minutes: 60
+  exclude_symbols: []
+  wash_volume_ratio: 0.35
+
+timeframes: ["15m", "1h", "4h", "1d"]
+
+instruments:
+  spot: true
+  perp: true
+  max_leverage: 2.0
+
+execution:
+  taker_fee_bps: 10.0
+  maker_fee_bps: 10.0
+  perp_taker_fee_bps: 5.0
+  latency_ms: 300
+  max_slippage_bps: 30.0
+  max_participation: 0.25
+  min_fill_ratio: 0.5
+  min_notional_usd: 10.0
+
+risk:
+  risk_per_trade_pct: 1.0
+  max_position_pct: 20.0
+  max_positions: 5
+  max_gross_exposure_pct: 100.0
+  max_cluster_positions: 2
+  max_cluster_exposure_pct: 35.0
+  corr_threshold: 0.8
+  daily_loss_limit_pct: 3.0
+  weekly_loss_limit_pct: 7.0
+  max_drawdown_pct: 15.0
+  cooldown_losses: 3
+  cooldown_minutes: 240
+  max_data_age_sec: 180.0
+  max_spread_bps: 15.0
+  max_gap_pct: 8.0
+  max_divergence_bps: 80.0
+  max_funding_rate_abs: 0.001
+  default_stop_atr_mult: 2.0
+  blackout_minutes: 30
+  blackout_windows: []
+
+strategies:
+  enabled:
+    - "ema_trend"
+    - "macd_trend"
+    - "donchian_breakout"
+    - "rsi_mean_rev"
+    - "bb_mean_rev"
+    - "momentum"
+    - "flat"
+    - "random_benchmark"
+  allocations: {}
+  ema_fast: 20
+  ema_slow: 50
+  timeframe: "1h"
+  random_prob: 0.03
+  random_seed: 42
+  exploration_floor: 0.10
+  rebalance_days: 3.0
+
+ai:
+  enabled: true
+  cache_ttl_sec: 900
+
+copytrading:
+  enabled: true
+  provider: "hyperliquid"
+  refresh_hours: 24
+  tracked_max: 10
+  copy_delay_min: 3
+  min_decisive: 15
+  min_score: 0.5
+
+verdict:
+  min_weeks: 6.0
+  min_trades: 100
+  min_sharpe: 1.0
+  max_drawdown_pct: 12.0
+  min_profit_factor: 1.3
+
+storage:
+  db_path: "data/bot.db"
+  log_dir: "logs"
+  report_dir: "reports"
+  heartbeat_file: "data/heartbeat.json"
+
+monitoring:
+  heartbeat_sec: 30
+  snapshot_minutes: 15
+  loop_interval_sec: 30.0
+  health_max_age_sec: 180
+  log_level: "INFO"

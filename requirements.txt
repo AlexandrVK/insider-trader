@@ -1,6 +1,11 @@
-fastapi
-uvicorn
-requests
-boto3
-openai
-python-multipart
+ccxt>=4.4.0
+pydantic>=2.7.0
+PyYAML>=6.0.1
+numpy>=1.26.0
+requests>=2.31.0
+aiohttp>=3.9.5
+openai>=1.30.0
+boto3>=1.34.0
+matplotlib>=3.8.0
+pytest>=8.2.0
+pytest-asyncio>=0.23.6
