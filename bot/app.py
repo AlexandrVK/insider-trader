@@ -175,7 +175,7 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
     def handle_cmd(action: str) -> str:
         eng: Optional[TradingEngine] = state_holder["engine"]
         if action == "backup":
-            ok = s3_sync.backup_now(db)
+            ok = s3_sync.backup_now(db, force=True)
             return "бэкап выполнен" if ok else "S3 отключён или ошибка бэкапа"
         if eng is None:
             return "движок ещё запускается"
@@ -227,7 +227,7 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
         asyncio.create_task(sup.supervise("engine", lambda: engine.run(stop))),
         asyncio.create_task(sup.supervise("heartbeat", lambda: heartbeat_loop(stop, cfg.storage.heartbeat_file,
                                                                               cfg.monitoring.heartbeat_sec, payload))),
-        asyncio.create_task(sup.supervise("s3_backup", lambda: s3_backup_loop(stop, s3_sync, db, interval_sec=900.0))),
+        asyncio.create_task(sup.supervise("s3_backup", lambda: s3_backup_loop(stop, s3_sync, db, interval_sec=3600.0))),
         asyncio.create_task(sup.supervise("websocket", ws_manager)),
     ])
 

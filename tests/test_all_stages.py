@@ -12,6 +12,7 @@ from bot.report import build_report, evaluate_verdict, trade_stats
 from bot.signals.aggregator import ConfidenceCalibrator, SignalAggregator
 from bot.simulate import sim_settings, simulate
 from bot.sources.registry import SourceRegistry
+from bot.storage_s3 import S3SyncManager
 from bot.strategies.baseline import EmaTrendStrategy
 from bot.strategies.meta_selector import CUSUMDetector, MetaSelector, deflated_sharpe_ratio
 
@@ -104,3 +105,26 @@ def test_stage6_verdict_thresholds():
     assert cat == "статистически подтверждено"
     cat_small, _ = evaluate_verdict(st, days=10.0, dd_pct=6.0, cfg=cfg)
     assert cat_small == "не доказано"
+
+
+def test_compact_s3_snapshot_strips_candles(tmp_path):
+    import sqlite3
+    db_path = tmp_path / "test.db"
+    db = Database(db_path)
+    db.set_meta("keep_me", "yes")
+    db.executemany(
+        "INSERT INTO candles (exchange, symbol, timeframe, ts, o, h, l, c, v) VALUES (?,?,?,?,?,?,?,?,?)",
+        [("bybit", "BTC/USDT", "1h", i * 3600000, 100.0, 101.0, 99.0, 100.5, 10.0) for i in range(500)],
+    )
+    raw = S3SyncManager._compact_snapshot_bytes(db_path, db=db)
+    out = tmp_path / "restored.db"
+    out.write_bytes(raw)
+    con = sqlite3.connect(str(out))
+    try:
+        assert con.execute("SELECT COUNT(*) FROM candles").fetchone()[0] == 0
+        assert con.execute("SELECT value FROM meta WHERE key='keep_me'").fetchone()[0] == "yes"
+    finally:
+        con.close()
+    # В живой БД свечи не удалены
+    assert db.one("SELECT COUNT(*) AS n FROM candles")["n"] == 500
+    db.close()

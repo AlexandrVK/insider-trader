@@ -37,6 +37,15 @@ class MarketData:
             self.db.executemany(
                 "INSERT OR REPLACE INTO candles (exchange, symbol, timeframe, ts, o, h, l, c, v) VALUES (?,?,?,?,?,?,?,?,?)",
                 [(ex, symbol, tf, c.ts, c.o, c.h, c.l, c.c, c.v) for c in candles])
+            cutoff = self.db.one(
+                "SELECT ts FROM candles WHERE exchange=? AND symbol=? AND timeframe=? ORDER BY ts DESC LIMIT 1 OFFSET 600",
+                (ex, symbol, tf),
+            )
+            if cutoff is not None:
+                self.db.execute(
+                    "DELETE FROM candles WHERE exchange=? AND symbol=? AND timeframe=? AND ts <= ?",
+                    (ex, symbol, tf, cutoff["ts"]),
+                )
             self._last_ok[symbol] = self.clock()
         return len(candles)
 

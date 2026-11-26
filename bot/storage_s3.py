@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import hashlib
 import logging
 import os
 import sqlite3
@@ -63,6 +64,7 @@ class S3SyncManager:
         self.uploaded_bytes: int = 0
         self.last_error: str = ""
         self._safe_to_upload = True
+        self._last_digest: str = ""
 
     def restore_on_startup(self) -> bool:
         """Скачивает bot.db.gz из B2 при старте. Если ключа нет — первый запуск.
@@ -98,18 +100,13 @@ class S3SyncManager:
             log.error("Ошибка восстановления БД из S3; авто-бэкап отключён", extra={"error": self.last_error})
             return False
 
-    def backup_now(self, db=None) -> bool:
-        """Безопасный горячий бэкап SQLite (совместим с WAL) -> gzip -> S3."""
-        if not self.enabled or not self._safe_to_upload or not self.db_path.exists():
-            return False
-        bucket = os.getenv("S3_BUCKET", "").strip()
-        key = _remote_key(self.remote_name)
-        tmp_path = None
+    @staticmethod
+    def _compact_snapshot_bytes(src_path: Path, db=None) -> bytes:
+        """Создаёт компактный снимок SQLite без публичного кэша свечей (candles докачиваются с биржи)."""
+        fd, tmp_name = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
         try:
-            fd, tmp_name = tempfile.mkstemp(suffix=".db")
-            os.close(fd)
-            tmp_path = Path(tmp_name)
-            # Горячий консистентный снимок SQLite через встроенный backup API
             if db is not None and hasattr(db, "_conn") and hasattr(db, "_lock"):
                 with db._lock:
                     dst = sqlite3.connect(str(tmp_path))
@@ -118,7 +115,7 @@ class S3SyncManager:
                     finally:
                         dst.close()
             else:
-                src = sqlite3.connect(str(self.db_path))
+                src = sqlite3.connect(str(src_path))
                 dst = sqlite3.connect(str(tmp_path))
                 try:
                     src.backup(dst)
@@ -126,8 +123,43 @@ class S3SyncManager:
                     dst.close()
                     src.close()
 
-            payload = gzip.compress(tmp_path.read_bytes(), compresslevel=6)
+            # Очищаем публичный кэш свечей только во временной копии и сжимаем файл БД
+            compact = sqlite3.connect(str(tmp_path))
+            try:
+                compact.execute("PRAGMA journal_mode=DELETE")
+                try:
+                    compact.execute("DELETE FROM candles")
+                    compact.commit()
+                except sqlite3.OperationalError:
+                    pass
+                compact.execute("VACUUM")
+                compact.commit()
+            finally:
+                compact.close()
+
+            return tmp_path.read_bytes()
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def backup_now(self, db=None, force: bool = False) -> bool:
+        """Безопасный горячий бэкап SQLite (без кэша candles, с пропуском неизменённой БД) -> gzip -> S3."""
+        if not self.enabled or not self._safe_to_upload or not self.db_path.exists():
+            return False
+        bucket = os.getenv("S3_BUCKET", "").strip()
+        key = _remote_key(self.remote_name)
+        try:
+            raw = self._compact_snapshot_bytes(self.db_path, db=db)
+            digest = hashlib.sha256(raw).hexdigest()
+            if not force and digest == self._last_digest:
+                log.debug("S3-бэкап пропущен: состояние БД не изменилось")
+                return True
+            payload = gzip.compress(raw, compresslevel=9)
             _client().put_object(Bucket=bucket, Key=key, Body=payload)
+            self._last_digest = digest
             self.last_backup_ts = time.time()
             self.saves += 1
             self.uploaded_bytes += len(payload)
@@ -138,12 +170,6 @@ class S3SyncManager:
             self.last_error = f"backup {type(e).__name__}: {e}"
             log.warning("Не удалось выгрузить бэкап в S3", extra={"error": self.last_error})
             return False
-        finally:
-            if tmp_path and tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
 
     def status(self) -> dict:
         return {
@@ -157,7 +183,7 @@ class S3SyncManager:
         }
 
 
-async def s3_backup_loop(stop: asyncio.Event, sync: S3SyncManager, db, interval_sec: float = 900.0) -> None:
+async def s3_backup_loop(stop: asyncio.Event, sync: S3SyncManager, db, interval_sec: float = 3600.0) -> None:
     if not sync.enabled:
         await stop.wait()
         return
