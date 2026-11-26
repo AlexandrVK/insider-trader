@@ -31,8 +31,9 @@ instruments:
 
 execution:
   taker_fee_bps: 10.0
-  maker_fee_bps: 10.0
+  maker_fee_bps: 4.0
   perp_taker_fee_bps: 5.0
+  perp_maker_fee_bps: 2.0
   latency_ms: 300
   max_slippage_bps: 30.0
   max_participation: 0.25
@@ -69,6 +70,8 @@ strategies:
     - "rsi_mean_rev"
     - "bb_mean_rev"
     - "momentum"
+    - "cross_sectional_momentum"
+    - "funding_carry"
     - "flat"
     - "random_benchmark"
   allocations: {}
@@ -79,6 +82,25 @@ strategies:
   random_seed: 42
   exploration_floor: 0.10
   rebalance_days: 3.0
+
+features:
+  regime_gating: true
+  mtf_filter: true
+  trailing_stop: true
+  fee_edge_filter: true
+  obi_filter: true
+  maker_first: true
+  closed_loop_learning: true
+  funding_alpha: true
+  cross_sectional_momentum: true
+  vol_targeting: true
+  meta_labeling: true
+  ai_review: true
+  copytrading: true
+  min_edge_to_cost: 3.0
+  obi_veto_threshold: 0.65
+  target_annual_vol: 0.20
+  meta_label_min_trades: 40
 
 ai:
   enabled: true

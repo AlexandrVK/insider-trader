@@ -146,6 +146,36 @@ class FlatStrategy(Strategy):
         return None
 
 
+class CrossSectionalMomentumStrategy(Strategy):
+    """Этап B: кросс-секционный моментум к BTC (ранжирование всех пар универсума в движке)."""
+    id, version, n_params = "cross_sectional_momentum", "1.0", 2
+
+    def __init__(self, timeframe: str = "1h"):
+        self.timeframe = timeframe
+        self.min_candles = 30
+
+    def generate(self, symbol: str, candles: Sequence[Candle], now: float) -> Optional[Signal]:
+        # Сигналы генерируются кросс-секционно по всему универсуму в TradingEngine._run_cross_sectional()
+        return None
+
+
+class FundingCarryStrategy(Strategy):
+    """Этап B: деривативная альфа — сбор высокого фандинга / контр-перегрев перпов."""
+    id, version, n_params = "funding_carry", "1.0", 2
+
+    def __init__(self, timeframe: str = "1h"):
+        self.timeframe = timeframe
+        self.min_candles = 30
+
+    def generate(self, symbol: str, candles: Sequence[Candle], now: float) -> Optional[Signal]:
+        # Сигналы генерируются по ставкам фандинга перпов в TradingEngine._run_funding_carry()
+        return None
+
+
+TREND_STRATEGIES = {"ema_trend", "macd_trend", "donchian_breakout", "momentum", "cross_sectional_momentum"}
+MEAN_REV_STRATEGIES = {"rsi_mean_rev", "bb_mean_rev"}
+
+
 def build_strategies(cfg: StrategiesCfg) -> list[Strategy]:
     tf = cfg.timeframe
     reg = {
@@ -155,6 +185,8 @@ def build_strategies(cfg: StrategiesCfg) -> list[Strategy]:
         "rsi_mean_rev": lambda: RsiMeanReversionStrategy(14, 30.0, 70.0, tf),
         "bb_mean_rev": lambda: BollingerMeanReversionStrategy(20, 2.0, tf),
         "momentum": lambda: MomentumStrategy(24, 2.5, tf),
+        "cross_sectional_momentum": lambda: CrossSectionalMomentumStrategy(tf),
+        "funding_carry": lambda: FundingCarryStrategy(tf),
         "flat": lambda: FlatStrategy(tf),
         "random_benchmark": lambda: RandomEntryStrategy(cfg.random_prob, cfg.random_seed, tf),
     }

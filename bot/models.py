@@ -80,6 +80,13 @@ class OrderBook:
         ask = sum(p * q for p, q in self.asks if p <= hi)
         return min(bid, ask)
 
+    def imbalance(self, levels: int = 10) -> float:
+        """Дисбаланс стакана (OBI) по топ-N уровням: +1 — перевес покупателей, -1 — продавцов."""
+        b = sum(p * q for p, q in self.bids[:levels])
+        a = sum(p * q for p, q in self.asks[:levels])
+        tot = b + a
+        return (b - a) / tot if tot > 0 else 0.0
+
     def walk(self, side: Literal["buy", "sell"], qty: float, max_slip_bps: Optional[float] = None) -> WalkResult:
         book = self.asks if side == "buy" else self.bids
         if not book or qty <= 0:
@@ -140,6 +147,12 @@ class MarketContext:
     cluster: str = ""
     instrument: str = "spot"
     funding_rate: float = 0.0
+    obi: float = 0.0
+    vol_scalar: float = 1.0
+    mtf_trend: int = 0
+    ml_scale: float = 1.0
+    ml_prob: Optional[float] = None
+    ml_features: dict = field(default_factory=dict)
 
 
 @dataclass

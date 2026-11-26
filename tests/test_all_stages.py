@@ -6,9 +6,15 @@ from bot.config import Settings
 from bot.copytrading.hyperliquid import HyperliquidCopySource, _iter_leaderboard_rows, wilson_lower_bound
 from bot.db import Database
 from bot.exchange.fake import FakeExchange
+from bot.execution.base import OrderRequest
+from bot.execution.paper import PaperExecutor
+from bot.journal import Journal
 from bot.market.indicators import bollinger, detect_regime, macd, rsi
-from bot.models import Signal
+from bot.ml.meta_labeler import MetaLabeler, extract_features
+from bot.models import MarketContext, OrderBook, Signal
+from bot.portfolio import Portfolio
 from bot.report import build_report, evaluate_verdict, trade_stats
+from bot.risk import RiskEngine
 from bot.signals.aggregator import ConfidenceCalibrator, SignalAggregator
 from bot.simulate import sim_settings, simulate
 from bot.sources.registry import SourceRegistry
@@ -127,4 +133,57 @@ def test_compact_s3_snapshot_strips_candles(tmp_path):
         con.close()
     # В живой БД свечи не удалены
     assert db.one("SELECT COUNT(*) AS n FROM candles")["n"] == 500
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_stages_abc_risk_maker_and_meta_labeler(tmp_path):
+    cfg = Settings()
+    db = Database(tmp_path / "abc.db")
+    pf = Portfolio(db, 10000.0, {"ema_trend": 0.5, "funding_carry": 0.5})
+    risk = RiskEngine(cfg, pf, Journal(db))
+
+    # 1. Fee-edge filter блокирует сделку с малым ATR относительно издержек
+    sig = Signal(strategy_id="ema_trend", symbol="BTC/USDT", direction="long", confidence=0.6, stop_atr_mult=2.0, take_atr_mult=2.0)
+    tiny_atr_ctx = MarketContext(symbol="BTC/USDT", price=100000.0, atr=30.0, spread_bps=5.0, data_age_sec=1.0, depth_usd=500000.0, instrument="spot")
+    dec_low = risk.evaluate(sig, tiny_atr_ctx, {"BTC/USDT": 100000.0})
+    assert not dec_low.approved and any("low_edge_to_cost" in r for r in dec_low.reasons)
+
+    # 2. OBI filter блокирует лонг в сильную стену продавцов
+    wall_ctx = MarketContext(symbol="BTC/USDT", price=100000.0, atr=1500.0, spread_bps=2.0, data_age_sec=1.0, depth_usd=500000.0, instrument="spot", obi=-0.8)
+    dec_obi = risk.evaluate(sig, wall_ctx, {"BTC/USDT": 100000.0})
+    assert not dec_obi.approved and any("adverse_obi" in r for r in dec_obi.reasons)
+
+    # 3. Sign-aware funding: высокий положительный фандинг разрешён для SHORT (мы получаем фандинг), но запрещён для LONG
+    sh_sig = Signal(strategy_id="funding_carry", symbol="BTC/USDT", direction="short", confidence=0.65, stop_atr_mult=2.0, take_atr_mult=3.0)
+    fund_ctx = MarketContext(symbol="BTC/USDT", price=100000.0, atr=1500.0, spread_bps=2.0, data_age_sec=1.0, depth_usd=500000.0, instrument="perp", funding_rate=0.002)
+    assert risk.evaluate(sh_sig, fund_ctx, {"BTC/USDT": 100000.0}).approved
+    lg_sig = Signal(strategy_id="funding_carry", symbol="BTC/USDT", direction="long", confidence=0.65, stop_atr_mult=2.0, take_atr_mult=3.0)
+    assert not risk.evaluate(lg_sig, fund_ctx, {"BTC/USDT": 100000.0}).approved
+
+    # 4. Maker-First исполнение использует maker-комиссию
+    ob = OrderBook(ts=1.0, bids=[(99.9, 100.0)], asks=[(100.1, 100.0)])
+    async def book_fn(_s): return ob
+    async def no_sleep(_t): return None
+    ex = PaperExecutor(db, book_fn, cfg.execution, sleep=no_sleep)
+    res = await ex.submit(OrderRequest(client_id="m1", symbol="BTC/USDT", instrument="perp", side="buy", qty=1.0, ref_price=100.0, strategy_id="ema_trend", bet_id="b1", maker_preferred=True))
+    assert res.status == "filled" and res.fills[0].liquidity == "maker" and abs(res.avg_px - 99.9) < 1e-6
+
+    # 5. Meta-Labeler (Этап C) обучается и разделяет сильные/слабые контексты
+    ml = MetaLabeler(min_trades=20)
+    X, y = [], []
+    for i in range(40):
+        good = i % 2 == 0
+        f = extract_features(
+            confidence=0.75 if good else 0.45, direction="long", regime="trend" if good else "flat",
+            mtf_trend=1 if good else -1, obi=0.4 if good else -0.4, funding_rate=0.0,
+            spread_bps=2.0, atr=1000.0, price=100000.0,
+        )
+        X.append(f)
+        y.append(1 if good else 0)
+    assert ml.fit(X, y) and ml.active and ml.train_acc >= 90.0
+    p_good, sc_good = ml.predict_scale(X[0])
+    p_bad, sc_bad = ml.predict_scale(X[1])
+    assert p_good > 0.7 and sc_good > 0.8
+    assert p_bad < 0.3 and sc_bad == 0.0
     db.close()

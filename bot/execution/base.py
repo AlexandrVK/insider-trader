@@ -16,6 +16,7 @@ class OrderRequest:
     bet_id: str = ""
     reduce_only: bool = False
     reason: str = ""
+    maker_preferred: bool = False
 
 
 @dataclass

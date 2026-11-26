@@ -84,28 +84,29 @@ class MetaSelector:
         }
         self.weights: dict[str, float] = {sid: 1.0 / len(self.strategy_ids) for sid in self.strategy_ids}
 
-    def _load_returns_by_regime(self, regime: str, lookback: int = 50) -> dict[str, list[float]]:
-        out: dict[str, list[float]] = {sid: [] for sid in self.strategy_ids}
+    def _load_returns_by_regime(self, regime: str, lookback: int = 50) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+        reg_out: dict[str, list[float]] = {sid: [] for sid in self.strategy_ids}
+        all_out: dict[str, list[float]] = {sid: [] for sid in self.strategy_ids}
         rows = self.db.query(
             "SELECT strategy_id, pnl_pct, regime FROM bets WHERE status='closed' ORDER BY exit_ts DESC LIMIT ?",
             (lookback * len(self.strategy_ids),),
         )
         for r in reversed(rows):
             sid = r["strategy_id"]
-            if sid not in out:
+            if sid not in all_out or r["pnl_pct"] is None:
                 continue
-            if regime and r["regime"] and r["regime"] != regime:
-                continue
-            if r["pnl_pct"] is not None:
-                out[sid].append(float(r["pnl_pct"]))
-        return out
+            val = float(r["pnl_pct"])
+            all_out[sid].append(val)
+            if not regime or not r["regime"] or r["regime"] == regime:
+                reg_out[sid].append(val)
+        return reg_out, all_out
 
     def update_weights(self, regime: str = "", force: bool = False) -> dict[str, float]:
         now = self.clock()
         if not force and self.last_rebalance_ts and (now - self.last_rebalance_ts) < self.rebalance_sec:
             return dict(self.weights)
 
-        rets_map = self._load_returns_by_regime(regime)
+        reg_map, all_map = self._load_returns_by_regime(regime)
         n_trials = max(1, len(self.strategy_ids))
         raw_scores: dict[str, float] = {}
         reasons: dict[str, str] = {}
@@ -116,7 +117,10 @@ class MetaSelector:
                 reasons[sid] = "cash_baseline"
                 continue
             st = self.states[sid]
-            rets = rets_map.get(sid, [])
+            # Предпочитаем статистику текущего режима, но если в нём мало сделок — используем общую историю
+            rets = reg_map.get(sid, [])
+            if len(rets) < st.quarantine_min_trades:
+                rets = all_map.get(sid, [])
             if len(rets) < st.quarantine_min_trades:
                 raw_scores[sid] = -10.0
                 reasons[sid] = f"quarantine({len(rets)}/{st.quarantine_min_trades})"
@@ -124,18 +128,29 @@ class MetaSelector:
 
             arr = np.asarray(rets, dtype=float)
             std = float(np.std(arr, ddof=1)) or 1.0
+            meta_key = f"cusum_degraded_since:{sid}"
+            prev_deg = float(self.db.get_meta(meta_key, "0") or 0.0)
             st.cusum.reset()
             for x in arr[-20:]:
                 st.cusum.update(x / std, now)
 
             if st.cusum.degraded:
-                if now - st.cusum.degraded_since >= self.recheck_sec:
+                deg_since = prev_deg if prev_deg > 0 else now
+                if prev_deg <= 0:
+                    self.db.set_meta(meta_key, str(deg_since))
+                st.cusum.degraded_since = deg_since
+                if now - deg_since >= self.recheck_sec:
+                    # Повторный шанс через 7 дней в режиме карантина
+                    self.db.set_meta(meta_key, "0")
                     st.cusum.reset()
-                    reasons[sid] = "recheck_after_degradation"
-                else:
-                    raw_scores[sid] = -20.0
-                    reasons[sid] = "cusum_degraded"
+                    raw_scores[sid] = -10.0
+                    reasons[sid] = "recheck_after_7d"
                     continue
+                raw_scores[sid] = -20.0
+                reasons[sid] = "cusum_degraded"
+                continue
+            elif prev_deg > 0:
+                self.db.set_meta(meta_key, "0")
 
             dsr = deflated_sharpe_ratio(rets, n_trials=n_trials)
             penalty = 0.02 * st.n_params

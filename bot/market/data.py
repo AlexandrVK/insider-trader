@@ -109,4 +109,4 @@ class MarketData:
         alt = await self.alt_price(symbol) if with_alt else None
         return MarketContext(symbol=symbol, price=ob.mid or t.mid, atr=atr(cs, 14), spread_bps=ob.spread_bps,
                              data_age_sec=self.data_age(symbol), depth_usd=ob.depth_usd(50), gap_pct=gap, alt_price=alt,
-                             cluster=cluster, instrument=instrument)
+                             cluster=cluster, instrument=instrument, obi=ob.imbalance(10))

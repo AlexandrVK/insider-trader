@@ -82,6 +82,10 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
                 "phase": state_holder["phase"],
                 "initial_capital": cfg.capital.initial_usdt,
                 "equity": cfg.capital.initial_usdt,
+                "regime": "",
+                "features": cfg.features.toggle_dict(),
+                "ml": {"active": False, "samples": 0, "min_trades": cfg.features.meta_label_min_trades, "train_acc_pct": 0.0, "last_prob": None, "blocked": 0},
+                "vol_targeting": {"btc_annual_vol": 0.0, "vol_scalar": 1.0},
                 "ai": {
                     "enabled": cfg.ai.enabled,
                     "last_provider": "",
@@ -152,6 +156,10 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
             "recent_rejected": recent_rej,
             "recent_events": recent_ev,
             "exchange": hub.exchange_id if hub else "",
+            "regime": eng._last_regime,
+            "features": eng.features_state(),
+            "ml": eng.meta_labeler.status(),
+            "vol_targeting": {"btc_annual_vol": eng._btc_annual_vol, "vol_scalar": eng._btc_vol_scalar_val},
             "halted": eng.pf.halted,
             "halt_reason": eng.pf.halt_reason,
             "paused": eng.pf.paused_until > now,
@@ -171,6 +179,43 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
     def render_report() -> str:
         res = build_report(db, cfg)
         return Path(res["paths"]["md"]).read_text(encoding="utf-8")
+
+    def build_agent_report() -> dict:
+        st = payload()
+        rep = build_report(db, cfg)
+        md_text = Path(rep["paths"]["md"]).read_text(encoding="utf-8")
+        eng: Optional[TradingEngine] = state_holder["engine"]
+        trades_50 = db.query(
+            "SELECT exit_ts, symbol, instrument, side, strategy_id, ai_assisted, regime, entry_px, exit_px, pnl, pnl_pct, fees, funding, mae_pct, mfe_pct, exit_reason "
+            "FROM bets WHERE status='closed' ORDER BY exit_ts DESC LIMIT 50"
+        )
+        return {
+            "version": __version__,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status": st,
+            "report": {
+                "verdict_category": rep["verdict_category"],
+                "verdict": rep["verdict"],
+                "return_pct": round(rep["return_pct"], 4),
+                "days": round(rep["days"], 3),
+                "strategy_stats": rep["stats"],
+            },
+            "source_ranking": eng.sources.ranking() if eng else [],
+            "recent_trades_50": trades_50,
+            "report_markdown": md_text,
+        }
+
+    def handle_feature(name: str, enabled: bool) -> dict:
+        eng: Optional[TradingEngine] = state_holder["engine"]
+        if eng is None:
+            valid = cfg.features.toggle_dict()
+            if name not in valid:
+                raise ValueError(f"неизвестная технология: {name}")
+            setattr(cfg.features, name, bool(enabled))
+            state = cfg.features.toggle_dict()
+            db.set_meta("features_json", json.dumps(state, ensure_ascii=False))
+            return state
+        return eng.set_feature(name, enabled)
 
     def handle_cmd(action: str) -> str:
         eng: Optional[TradingEngine] = state_holder["engine"]
@@ -198,7 +243,10 @@ async def run_bot(cfg: Settings, *, hub_factory=None, clock=time.time, stop: Opt
     web_enabled = is_render() or os.getenv("WEB_ENABLED", "true").lower() in ("1", "true", "yes")
     tasks: list[asyncio.Task] = []
     if web_enabled:
-        tasks.append(asyncio.create_task(sup.supervise("web", lambda: run_web_server(stop, payload, render_report, handle_cmd))))
+        tasks.append(asyncio.create_task(sup.supervise(
+            "web", lambda: run_web_server(stop, payload, render_report, handle_cmd,
+                                          feature_fn=handle_feature, agent_report_fn=build_agent_report)
+        )))
 
     hub = await build_hub(cfg, db, stop, hub_factory)
     if hub is None:

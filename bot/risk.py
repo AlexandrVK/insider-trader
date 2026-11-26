@@ -44,12 +44,21 @@ class RiskEngine:
         self.pf.db.log_risk_event("manual_reset", {}, self.clock())
 
     def evaluate(self, sig: Signal, ctx: MarketContext, prices: dict) -> RiskDecision:
-        r, ex, now = self.cfg.risk, self.cfg.execution, self.clock()
+        r, ex, feat, now = self.cfg.risk, self.cfg.execution, self.cfg.features, self.clock()
         pf = self.pf
         dec = RiskDecision(False, instrument=ctx.instrument)
         why = dec.reasons
         eq = pf.equity(prices)
-        dec.checks = {"equity": round(eq, 2)}
+        dec.checks = {
+            "equity": round(eq, 2),
+            "obi": round(ctx.obi, 3),
+            "vol_scalar": round(ctx.vol_scalar, 3),
+            "mtf_trend": ctx.mtf_trend,
+            "ml_prob": ctx.ml_prob,
+            "ml_scale": round(ctx.ml_scale, 3),
+            "ml_features": dict(ctx.ml_features) if ctx.ml_features else {},
+        }
+        side = 1 if sig.direction == "long" else (-1 if sig.direction == "short" else 0)
 
         if sig.direction == "flat":
             why.append("flat_signal")
@@ -67,8 +76,13 @@ class RiskEngine:
             why.append("spot_short_or_disabled")
         if ctx.instrument == "perp" and not self.cfg.instruments.perp:
             why.append("perp_disabled")
-        if ctx.instrument == "perp" and abs(ctx.funding_rate) > r.max_funding_rate_abs:
-            why.append(f"funding_too_high: {ctx.funding_rate:.4%}")
+        if ctx.instrument == "perp":
+            # При включённой funding_alpha блокируем только НЕБЛАГОПРИЯТНЫЙ высокий фандинг (который платим мы)
+            if feat.funding_alpha:
+                if side * ctx.funding_rate > r.max_funding_rate_abs:
+                    why.append(f"adverse_funding: {ctx.funding_rate:+.4%}")
+            elif abs(ctx.funding_rate) > r.max_funding_rate_abs:
+                why.append(f"funding_too_high: {ctx.funding_rate:.4%}")
         if ctx.data_age_sec > r.max_data_age_sec:
             why.append(f"stale_data: {ctx.data_age_sec:.0f}s")
         if ctx.spread_bps > r.max_spread_bps:
@@ -86,10 +100,27 @@ class RiskEngine:
             why.append("position_already_open")
         if len(pf.positions) >= r.max_positions:
             why.append("max_positions")
+
+        # Этап A: фильтр «потенциал тейка vs комиссия + спред» (не применяется к бенчмарку и funding_carry)
+        if feat.fee_edge_filter and not sig.benchmark and sig.strategy_id != "funding_carry" and ctx.atr > 0 and ctx.price > 0 and sig.take_atr_mult:
+            fee_one_way = (ex.perp_maker_fee_bps if feat.maker_first else ex.perp_taker_fee_bps) if ctx.instrument == "perp" else (ex.maker_fee_bps if feat.maker_first else ex.taker_fee_bps)
+            cost_bps = max(1.0, 2.0 * fee_one_way + max(0.0, ctx.spread_bps))
+            take_bps = (ctx.atr * sig.take_atr_mult / ctx.price) * 1e4
+            dec.checks["edge_to_cost"] = round(take_bps / cost_bps, 2)
+            if take_bps < feat.min_edge_to_cost * cost_bps:
+                why.append(f"low_edge_to_cost: {take_bps:.0f}bps < {feat.min_edge_to_cost:.1f}x*{cost_bps:.0f}bps")
+
+        # Этап A: микроструктура стакана (OBI) — не входить прямо в сильную стену против направления
+        if feat.obi_filter and not sig.benchmark and side * ctx.obi < -feat.obi_veto_threshold:
+            why.append(f"adverse_obi: {ctx.obi:+.2f}")
+
+        # Этап C: Meta-Labeling ML-фильтр (блокирует вход при низкой вероятности успеха)
+        if feat.meta_labeling and not sig.benchmark and ctx.ml_scale <= 0.0:
+            why.append(f"meta_label_low_prob: {ctx.ml_prob}")
+
         if why:
             return dec
 
-        side = 1 if sig.direction == "long" else -1
         mult = sig.stop_atr_mult or r.default_stop_atr_mult
         stop_dist = ctx.atr * mult
         stop_px = ctx.price - side * stop_dist
@@ -97,6 +128,11 @@ class RiskEngine:
             why.append("stop_below_zero")
             return dec
         qty = eq * r.risk_per_trade_pct / 100 / stop_dist
+        # Этап B (Portfolio Volatility Targeting) + Этап C (Meta-Labeling sizing)
+        if feat.vol_targeting and not sig.benchmark:
+            qty *= max(0.35, min(1.25, ctx.vol_scalar))
+        if feat.meta_labeling and not sig.benchmark:
+            qty *= max(0.0, min(1.0, ctx.ml_scale))
         notional = qty * ctx.price
         caps = {
             "risk": notional,

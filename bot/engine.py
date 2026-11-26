@@ -4,9 +4,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from typing import Callable, Optional
+
+import numpy as np
 
 from .analysis.ai import AIAnalystSuite, LLMProvider
 from .config import Settings
@@ -19,15 +22,17 @@ from .execution.base import Executor, OrderRequest
 from .execution.paper import PaperExecutor
 from .journal import Journal
 from .market.data import TF_SEC, MarketData
-from .market.indicators import detect_regime
+from .market.indicators import atr, closes, detect_regime, ema, log_returns, rsi
 from .market.universe import UniverseResult, select_universe
+from .ml.meta_labeler import MetaLabeler, extract_features
+from .models import Signal
 from .notify.telegram import TelegramNotifier
 from .portfolio import Portfolio, Position
 from .risk import RiskEngine
 from .signals.aggregator import SignalAggregator
 from .sources.registry import SourceRegistry
 from .strategies.meta_selector import MetaSelector
-from .strategies.pool import build_strategies
+from .strategies.pool import MEAN_REV_STRATEGIES, TREND_STRATEGIES, build_strategies
 
 log = logging.getLogger("bot.engine")
 
@@ -59,6 +64,8 @@ class TradingEngine:
             HyperliquidCopySource(cfg.copytrading.tracked_max, cfg.copytrading.min_score, cfg.copytrading.copy_delay_min)
             if cfg.copytrading.enabled else None
         )
+        self.meta_labeler = MetaLabeler(min_trades=cfg.features.meta_label_min_trades)
+        self.meta_labeler.fit_from_db(db)
         self.notifier = TelegramNotifier()
         self.universe: Optional[UniverseResult] = None
         self._uni_ts = 0.0
@@ -66,6 +73,11 @@ class TradingEngine:
         self._next_poll: dict[tuple, float] = {}
         self._bar_done: dict[tuple, int] = {}
         self._last_snapshot = 0.0
+        self._last_xsec_ts = 0.0
+        self._last_funding_scan_ts = 0.0
+        self._btc_vol_scalar_val = 1.0
+        self._btc_annual_vol = 0.0
+        self._last_regime = ""
 
         # Кэш внешних данных (новости, макро, ончейн, копитрейдинг)
         self._last_ext_ts = 0.0
@@ -80,7 +92,45 @@ class TradingEngine:
 
         self.stats = {"cycles": 0, "signals": 0, "rejected": 0, "opened": 0, "closed": 0, "errors": 0}
         self.last_cycle_ts = 0.0
+        self._load_features()
         self.reconcile()
+
+    def _load_features(self) -> None:
+        raw = self.db.get_meta("features_json")
+        if not raw:
+            return
+        try:
+            saved = json.loads(raw)
+        except Exception:
+            return
+        if isinstance(saved, dict):
+            valid = self.cfg.features.toggle_dict()
+            for k, v in saved.items():
+                if k in valid:
+                    setattr(self.cfg.features, k, bool(v))
+
+    def feature_enabled(self, name: str) -> bool:
+        return bool(getattr(self.cfg.features, name, False))
+
+    def features_state(self) -> dict[str, bool]:
+        return self.cfg.features.toggle_dict()
+
+    def set_feature(self, name: str, enabled: bool) -> dict[str, bool]:
+        valid = self.cfg.features.toggle_dict()
+        if name not in valid:
+            raise ValueError(f"неизвестная технология: {name}")
+        setattr(self.cfg.features, name, bool(enabled))
+        state = self.cfg.features.toggle_dict()
+        self.db.set_meta("features_json", json.dumps(state, ensure_ascii=False))
+        self.db.log_risk_event("feature_toggle", {"feature": name, "enabled": bool(enabled)}, self.clock())
+        if name == "copytrading" and enabled and self.copy_source is None:
+            self.copy_source = HyperliquidCopySource(
+                self.cfg.copytrading.tracked_max, self.cfg.copytrading.min_score, self.cfg.copytrading.copy_delay_min
+            )
+        if name == "ai_review" and enabled and self.llm is None:
+            self.llm = LLMProvider(cache_ttl_sec=self.cfg.ai.cache_ttl_sec)
+            self.ai_suite = AIAnalystSuite(self.llm)
+        return state
 
     def reconcile(self) -> None:
         open_ids = {p.bet_id for p in self.pf.positions.values()}
@@ -125,7 +175,10 @@ class TradingEngine:
     async def refresh_data(self) -> None:
         now = self.clock()
         sem = asyncio.Semaphore(4)
-        tfs = sorted({s.timeframe for s in self.strategies})
+        tf_set = {s.timeframe for s in self.strategies}
+        if self.feature_enabled("mtf_filter") and "4h" in self.cfg.timeframes:
+            tf_set.add("4h")
+        tfs = sorted(tf_set)
 
         async def one(sym: str, tf: str):
             key = (sym, tf)
@@ -133,7 +186,8 @@ class TradingEngine:
                 return
             async with sem:
                 try:
-                    await self.md.refresh_candles(sym, tf, 300)
+                    lim = 120 if tf == "4h" else 300
+                    await self.md.refresh_candles(sym, tf, lim)
                     sec = TF_SEC[tf]
                     self._next_poll[key] = (now // sec + 1) * sec + 5
                 except Unavailable:
@@ -146,7 +200,7 @@ class TradingEngine:
 
     async def refresh_external_data(self) -> None:
         """Раз в 15 минут обновляет бесплатные новости, макро и ончейн с соблюдением лимитов SourceRegistry."""
-        if not self.cfg.ai.enabled:
+        if not (self.cfg.ai.enabled and self.feature_enabled("ai_review")):
             return
         now = self.clock()
         if now - self._last_ext_ts < 900.0:
@@ -204,7 +258,7 @@ class TradingEngine:
 
     async def poll_copytrading(self) -> None:
         """Обновляет список трейдеров Hyperliquid раз в сутки и опрашивает их позиции раз в минуту."""
-        if not self.copy_source:
+        if not self.copy_source or not self.feature_enabled("copytrading"):
             return
         now = self.clock()
         if now - self._last_copy_refresh_ts >= self.cfg.copytrading.refresh_hours * 3600:
@@ -244,16 +298,92 @@ class TradingEngine:
         for s, t in tickers.items():
             self.prices[s] = t.mid
 
+    def _mtf_trend(self, symbol: str) -> int:
+        """Направление старшего таймфрейма 4h по EMA20/EMA50: +1 (вверх), -1 (вниз), 0 (нейтрально)."""
+        cs4 = self.md.closed_candles(symbol, "4h", 70)
+        if len(cs4) < 55:
+            return 0
+        c = closes(cs4)
+        e20, e50 = float(ema(c, 20)[-1]), float(ema(c, 50)[-1])
+        if e50 <= 0:
+            return 0
+        ratio = e20 / e50 - 1.0
+        if ratio > 0.002:
+            return 1
+        if ratio < -0.002:
+            return -1
+        return 0
+
+    def _update_vol_targeting(self) -> float:
+        """Этап B: Portfolio Volatility Targeting на базе реализованной 48h волатильности BTC."""
+        btc_cs = self.md.closed_candles("BTC/USDT", self.cfg.strategies.timeframe, 60)
+        if len(btc_cs) < 30:
+            self._btc_vol_scalar_val = 1.0
+            return 1.0
+        rets = log_returns(closes(btc_cs[-49:]))
+        if len(rets) < 20:
+            self._btc_vol_scalar_val = 1.0
+            return 1.0
+        bars_per_year = 365.0 * 86400.0 / TF_SEC.get(self.cfg.strategies.timeframe, 3600)
+        ann_vol = float(np.std(rets, ddof=1)) * math.sqrt(bars_per_year)
+        self._btc_annual_vol = round(ann_vol, 4)
+        if ann_vol <= 1e-6:
+            self._btc_vol_scalar_val = 1.0
+            return 1.0
+        scalar = max(0.35, min(1.25, self.cfg.features.target_annual_vol / ann_vol))
+        self._btc_vol_scalar_val = round(scalar, 3)
+        return self._btc_vol_scalar_val
+
     async def manage_positions(self) -> None:
         now = self.clock()
+        trailing_on = self.feature_enabled("trailing_stop")
         for p in list(self.pf.positions.values()):
             px = self.prices.get(p.exec_symbol) or self.prices.get(p.symbol)
             if not px:
                 continue
             self.pf.update_extremes(p.id, px, px)
+
+            # Начисление / списание 8-часового фандинга для открытых перп-позиций
+            if p.instrument == "perp" and now - p.last_funding_ts >= 8 * 3600:
+                try:
+                    fr = await self.hub.fetch_funding_rate(p.exec_symbol)
+                    if fr is not None:
+                        self.pf.apply_funding(p.id, fr.rate, px, now)
+                except Exception:
+                    pass
+
+            # Этап A: Breakeven + Partial Take-Profit (50%) + Chandelier Trailing Stop
+            if trailing_on:
+                cs = self.md.closed_candles(p.symbol, self.cfg.strategies.timeframe, 30)
+                cur_atr = atr(cs, 14) if len(cs) >= 16 else abs(p.entry_px - p.stop_px) / 2.0
+                if cur_atr > 0:
+                    gain = p.side * (px - p.entry_px)
+                    # 1) Перевод в безубыток (+0.15% на покрытие комиссий) после +1.5 ATR
+                    if gain >= 1.5 * cur_atr:
+                        be_px = p.entry_px * (1.0 + p.side * 0.0015)
+                        if (p.side > 0 and be_px > p.stop_px) or (p.side < 0 and be_px < p.stop_px):
+                            p.stop_px = be_px
+
+                    # 2) Для трендовых стратегий: частичная фиксация 50% на +2.5 ATR и Chandelier Trailing Stop
+                    if p.strategy_id in TREND_STRATEGIES:
+                        partial_key = f"partial:{p.id}"
+                        partial_done = self.db.get_meta(partial_key) == "1"
+                        if not partial_done and gain >= 2.5 * cur_atr and p.qty * px >= self.cfg.execution.min_notional_usd * 2.2:
+                            await self._close(p, px, "partial_tp", now, qty=p.qty * 0.5)
+                            self.db.set_meta(partial_key, "1")
+                            partial_done = True
+                            if p.id in self.pf.positions:
+                                p.take_px = 0.0  # даём второй половине забрать длинный тренд по трейлингу
+                        if partial_done or p.side * (p.mfe_px - p.entry_px) >= 2.0 * cur_atr:
+                            trail_px = p.mfe_px - p.side * 2.5 * cur_atr
+                            if (p.side > 0 and trail_px > p.stop_px) or (p.side < 0 and trail_px < p.stop_px):
+                                p.stop_px = trail_px
+
+            if p.id not in self.pf.positions:
+                continue
             reason = None
             if (p.side > 0 and px <= p.stop_px) or (p.side < 0 and px >= p.stop_px):
-                reason = "stop"
+                reason = "trailing_stop" if (trailing_on and p.side * (p.stop_px - p.entry_px) > 0) else "stop"
             elif p.take_px and ((p.side > 0 and px >= p.take_px) or (p.side < 0 and px <= p.take_px)):
                 reason = "take_profit"
             elif p.horizon_ts and now >= p.horizon_ts:
@@ -261,26 +391,58 @@ class TradingEngine:
             if reason:
                 await self._close(p, px, reason, now)
 
-    async def _close(self, p: Position, px: float, reason: str, now: float) -> None:
+    def _record_closed_learning(self, pos: Position, bet_row: dict, exit_px: float, now: float) -> None:
+        """Этап A/C: замыкает обратную связь в ConfidenceCalibrator, SourceRegistry и переобучает MetaLabeler."""
+        if not self.feature_enabled("closed_loop_learning"):
+            return
+        try:
+            blob = json.loads(bet_row.get("signals_json") or "{}")
+        except Exception:
+            blob = {}
+        sig_blob = blob.get("signal") or {}
+        raw_conf = float(sig_blob.get("confidence", 0.5))
+        if not sig_blob.get("benchmark"):
+            self.aggregator.calibrator.record(raw_conf, pos.realized_pnl > 0)
+            sources = json.loads(bet_row.get("source_ids_json") or "[]")
+            pos_ret_pct = (exit_px / pos.entry_px - 1.0) * 100.0 if pos.entry_px else 0.0
+            btc_cs = self.md.closed_candles("BTC/USDT", self.cfg.strategies.timeframe, 48)
+            btc_ret_pct = 0.0
+            if len(btc_cs) >= 2:
+                # Доходность BTC за близкое к длительности сделки окно
+                bars = max(1, min(len(btc_cs) - 1, int((now - pos.entry_ts) / 3600) or 1))
+                btc_ret_pct = (btc_cs[-1].c / btc_cs[-1 - bars].c - 1.0) * 100.0
+            horizon_min = int(sig_blob.get("horizon_min", 24 * 60))
+            for src_id in sources:
+                self.sources.record_outcome(src_id, pos.symbol, pos.side, horizon_min, pos_ret_pct, btc_ret_pct)
+        if self.feature_enabled("meta_labeling"):
+            self.meta_labeler.fit_from_db(self.db)
+
+    async def _close(self, p: Position, px: float, reason: str, now: float, qty: Optional[float] = None) -> None:
+        close_qty = min(qty, p.qty) if qty is not None else p.qty
+        if close_qty <= 0:
+            return
         attempt = self.db.one("SELECT COUNT(*) AS n FROM orders WHERE client_id LIKE ?", (f"exit:{p.id}:%",))["n"]
         req = OrderRequest(client_id=f"exit:{p.id}:{attempt}", symbol=p.exec_symbol, instrument=p.instrument,
-                           side="sell" if p.side > 0 else "buy", qty=p.qty, ref_price=px, strategy_id=p.strategy_id,
+                           side="sell" if p.side > 0 else "buy", qty=close_qty, ref_price=px, strategy_id=p.strategy_id,
                            bet_id=p.bet_id, reduce_only=True, reason=reason)
         res = await self.executor.submit(req)
         if res.qty <= 0:
             return
         entry_notional = p.qty * p.entry_px
+        bet_row = self.db.one("SELECT fees, notional, signals_json, source_ids_json FROM bets WHERE id=?", (p.bet_id,)) or {
+            "fees": 0.0, "notional": entry_notional, "signals_json": "{}", "source_ids_json": "[]"
+        }
         with self.db.tx():
             pos, _, full = self.pf.close_position(p.id, res.qty, res.avg_px, res.fee, reason, now)
             if full:
                 mae = pos.side * (pos.mae_px - pos.entry_px) / pos.entry_px * 100
                 mfe = pos.side * (pos.mfe_px - pos.entry_px) / pos.entry_px * 100
-                bet = self.db.one("SELECT fees, notional FROM bets WHERE id=?", (pos.bet_id,)) or {"fees": 0.0, "notional": entry_notional}
-                self.journal.close_bet(pos.bet_id, res.avg_px, now, reason, pos.realized_pnl, bet["notional"] or entry_notional,
-                                       mae, mfe, (bet["fees"] or 0.0) + res.fee, pos.funding_paid)
+                self.journal.close_bet(pos.bet_id, res.avg_px, now, reason, pos.realized_pnl, bet_row["notional"] or entry_notional,
+                                       mae, mfe, (bet_row["fees"] or 0.0) + res.fee, pos.funding_paid)
             self.pf.save(closed=[pos] if full else None)
         if full:
             self.stats["closed"] += 1
+            self._record_closed_learning(pos, bet_row, res.avg_px, now)
             await self._notify(
                 f"CLOSE {pos.symbol} ({'LONG' if pos.side > 0 else 'SHORT'}) | "
                 f"PnL: {pos.realized_pnl:+.2f} USDT | reason: {reason} | strat: {pos.strategy_id}"
@@ -300,13 +462,116 @@ class TradingEngine:
         src_weights = self.sources.sample_weights()
         return self.aggregator.aggregate(sig, ai_signals, source_weights=src_weights)
 
+    async def _run_cross_sectional(self, now: float, regime: str) -> None:
+        """Этап B: кросс-секционный моментум с BTC-нейтрализацией (раз в 4 часа)."""
+        if not self.feature_enabled("cross_sectional_momentum") or not self.universe:
+            return
+        if "cross_sectional_momentum" not in self.cfg.strategies.enabled:
+            return
+        if now - self._last_xsec_ts < 4 * 3600:
+            return
+        tf = self.cfg.strategies.timeframe
+        btc_cs = self.md.closed_candles("BTC/USDT", tf, 30)
+        if len(btc_cs) < 25:
+            return
+        self._last_xsec_ts = now
+        btc_ret = btc_cs[-1].c / btc_cs[-25].c - 1.0
+        scored: list[tuple[float, str, float]] = []
+        for sym in self.universe.symbols:
+            if sym == "BTC/USDT":
+                continue
+            cs = self.md.closed_candles(sym, tf, 30)
+            if len(cs) < 25:
+                continue
+            c = closes(cs[-25:])
+            vol = float(np.std(log_returns(c))) * math.sqrt(24.0)
+            if vol <= 1e-6:
+                continue
+            rel = (c[-1] / c[0] - 1.0) - btc_ret
+            z = rel / vol
+            scored.append((z, sym, rel * 100.0))
+        if len(scored) < 4:
+            return
+        scored.sort(key=lambda x: -x[0])
+        # Лонг самого сильного лидера относительно BTC и шорт самого слабого аутсайдера
+        top_z, top_sym, top_rel = scored[0]
+        bot_z, bot_sym, bot_rel = scored[-1]
+        if top_z >= 1.1:
+            sig = Signal(
+                strategy_id="cross_sectional_momentum", strategy_version="1.0", symbol=top_sym,
+                direction="long", confidence=min(0.75, 0.52 + 0.08 * top_z), timeframe=tf,
+                horizon_min=36 * 60, stop_atr_mult=2.2, take_atr_mult=3.8, ts=now, regime=regime,
+                thesis=f"Кросс-секционный лидер к BTC: rel={top_rel:+.2f}% (z={top_z:+.2f})",
+                evidence=[f"rel_btc={top_rel:+.2f}%", f"z={top_z:+.2f}"],
+                invalidation="потеря относительной силы / ATR-стоп",
+            )
+            self.stats["signals"] += 1
+            await self._handle_signal(sig, now)
+        if bot_z <= -1.1:
+            sig = Signal(
+                strategy_id="cross_sectional_momentum", strategy_version="1.0", symbol=bot_sym,
+                direction="short", confidence=min(0.75, 0.52 + 0.08 * abs(bot_z)), timeframe=tf,
+                horizon_min=36 * 60, stop_atr_mult=2.2, take_atr_mult=3.8, ts=now, regime=regime,
+                thesis=f"Кросс-секционный аутсайдер к BTC: rel={bot_rel:+.2f}% (z={bot_z:+.2f})",
+                evidence=[f"rel_btc={bot_rel:+.2f}%", f"z={bot_z:+.2f}"],
+                invalidation="разворот силы к BTC / ATR-стоп",
+            )
+            self.stats["signals"] += 1
+            await self._handle_signal(sig, now)
+
+    async def _run_funding_carry(self, now: float, regime: str) -> None:
+        """Этап B: деривативная альфа — вход в сторону получения экстремального фандинга (раз в 4 часа)."""
+        if not self.feature_enabled("funding_alpha") or not self.universe or not self.cfg.instruments.perp:
+            return
+        if "funding_carry" not in self.cfg.strategies.enabled:
+            return
+        if now - self._last_funding_scan_ts < 4 * 3600:
+            return
+        self._last_funding_scan_ts = now
+        tf = self.cfg.strategies.timeframe
+        for sym in self.universe.symbols[:8]:
+            perp = self.hub.perp_symbol(sym)
+            if not perp:
+                continue
+            try:
+                fr = await self.hub.fetch_funding_rate(perp)
+            except Exception:
+                continue
+            if not fr or abs(fr.rate) < 0.0003:  # >= 0.03% за 8ч (~33% годовых)
+                continue
+            cs = self.md.closed_candles(sym, tf, 30)
+            if len(cs) < 20:
+                continue
+            r_now = float(rsi(closes(cs), 14)[-1])
+            if fr.rate >= 0.0003 and r_now >= 55.0:
+                direction = "short"
+            elif fr.rate <= -0.0003 and r_now <= 45.0:
+                direction = "long"
+            else:
+                continue
+            sig = Signal(
+                strategy_id="funding_carry", strategy_version="1.0", symbol=sym,
+                direction=direction, confidence=min(0.74, 0.55 + abs(fr.rate) * 200.0), timeframe=tf,
+                horizon_min=48 * 60, stop_atr_mult=2.5, take_atr_mult=3.2, ts=now, regime=regime,
+                thesis=f"Funding carry/crowding ({fr.rate:+.4%}/8ч, RSI={r_now:.1f})",
+                evidence=[f"funding={fr.rate:+.4%}", f"rsi={r_now:.1f}"],
+                invalidation="нормализация фандинга / ATR-стоп",
+            )
+            self.stats["signals"] += 1
+            await self._handle_signal(sig, now)
+
     async def generate_and_trade(self) -> None:
         if not self.universe:
             return
         now = self.clock()
         btc_cs = self.md.closed_candles("BTC/USDT", self.cfg.strategies.timeframe, 60)
         regime = detect_regime(btc_cs) if btc_cs else ""
+        self._last_regime = regime
+        self._update_vol_targeting()
         self.pf.allocations = self.meta.update_weights(regime=regime)
+
+        regime_gate = self.feature_enabled("regime_gating")
+        mtf_on = self.feature_enabled("mtf_filter")
 
         for strat in self.strategies:
             for sym in self.universe.symbols:
@@ -326,11 +591,34 @@ class TradingEngine:
                 if sig is None:
                     continue
                 self.stats["signals"] += 1
+
+                # Этап A: режимный фильтр стратегий (трендовые не торгуют в flat, контртрендовые — только в flat)
+                if regime_gate and not sig.benchmark and regime:
+                    if strat.id in TREND_STRATEGIES and regime in ("flat", "panic"):
+                        self.stats["rejected"] += 1
+                        self.journal.reject(sig, [f"regime_gate: {strat.id} отключена в {regime}"], None)
+                        continue
+                    if strat.id in MEAN_REV_STRATEGIES and regime != "flat":
+                        self.stats["rejected"] += 1
+                        self.journal.reject(sig, [f"regime_gate: {strat.id} только в flat (сейчас {regime})"], None)
+                        continue
+
+                # Этап A: MTF-фильтр старшего таймфрейма 4h для трендовых стратегий
+                if mtf_on and not sig.benchmark and strat.id in TREND_STRATEGIES:
+                    mtf = self._mtf_trend(sym)
+                    if (sig.direction == "long" and mtf < 0) or (sig.direction == "short" and mtf > 0):
+                        self.stats["rejected"] += 1
+                        self.journal.reject(sig, [f"mtf_4h_conflict: 4h={mtf:+d}"], None)
+                        continue
+
                 await self._handle_signal(sig, now)
+
+        await self._run_cross_sectional(now, regime)
+        await self._run_funding_carry(now, regime)
 
     async def _handle_signal(self, sig, now: float) -> None:
         # Прогон через ИИ-аналитиков и агрегатор (кроме контрольного случайного бенчмарка)
-        if self.cfg.ai.enabled and not sig.benchmark:
+        if self.cfg.ai.enabled and self.feature_enabled("ai_review") and not sig.benchmark:
             try:
                 merged = await asyncio.to_thread(self._run_ai_review, sig)
                 if merged is None:
@@ -341,7 +629,7 @@ class TradingEngine:
             except Exception as e:
                 log.warning("ИИ-проверка пропущена из-за ошибки", extra={"error": str(e)[:120]})
 
-        inst = "spot" if sig.direction == "long" and self.cfg.instruments.spot else "perp"
+        inst = "perp" if (sig.strategy_id == "funding_carry" or sig.direction == "short" or not self.cfg.instruments.spot) else "spot"
         exec_sym = sig.symbol if inst == "spot" else self.hub.perp_symbol(sig.symbol)
         cluster = self.universe.clusters.get(sig.symbol, "") if self.universe else ""
         if exec_sym is None:
@@ -357,6 +645,21 @@ class TradingEngine:
             self.stats["rejected"] += 1
             self.journal.reject(sig, [f"no_market_data: {str(e)[:80]}"], None)
             return
+
+        ctx.mtf_trend = self._mtf_trend(sig.symbol) if self.feature_enabled("mtf_filter") else 0
+        ctx.vol_scalar = self._btc_vol_scalar_val if self.feature_enabled("vol_targeting") else 1.0
+        feats = extract_features(
+            confidence=sig.confidence, direction=sig.direction, regime=sig.regime or self._last_regime,
+            mtf_trend=ctx.mtf_trend, obi=ctx.obi, funding_rate=ctx.funding_rate,
+            spread_bps=ctx.spread_bps, atr=ctx.atr, price=ctx.price,
+        )
+        ctx.ml_features = feats
+        if self.feature_enabled("meta_labeling") and not sig.benchmark:
+            prob, scale = self.meta_labeler.predict_scale(feats)
+            ctx.ml_prob, ctx.ml_scale = prob, scale
+        else:
+            ctx.ml_prob, ctx.ml_scale = None, 1.0
+
         dec = self.risk.evaluate(sig, ctx, self.prices)
         if not dec.approved:
             self.stats["rejected"] += 1
@@ -365,7 +668,8 @@ class TradingEngine:
         bet_id = uuid.uuid4().hex
         req = OrderRequest(client_id=f"entry:{bet_id}", symbol=exec_sym, instrument=inst,
                            side="buy" if sig.direction == "long" else "sell", qty=dec.qty, ref_price=ctx.price,
-                           strategy_id=sig.strategy_id, bet_id=bet_id, reason=sig.thesis[:100])
+                           strategy_id=sig.strategy_id, bet_id=bet_id, reason=sig.thesis[:100],
+                           maker_preferred=bool(self.feature_enabled("maker_first") and not sig.benchmark))
         res = await self.executor.submit(req)
         if res.qty <= 0:
             self.stats["rejected"] += 1

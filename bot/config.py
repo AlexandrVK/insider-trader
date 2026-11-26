@@ -41,8 +41,9 @@ class InstrumentsCfg(BaseModel):
 
 class ExecutionCfg(BaseModel):
     taker_fee_bps: float = 10.0
-    maker_fee_bps: float = 10.0
+    maker_fee_bps: float = 4.0
     perp_taker_fee_bps: float = 5.0
+    perp_maker_fee_bps: float = 2.0
     latency_ms: int = 300
     max_slippage_bps: float = 30.0
     max_participation: float = 0.25
@@ -76,7 +77,9 @@ class RiskCfg(BaseModel):
 class StrategiesCfg(BaseModel):
     enabled: list[str] = [
         "ema_trend", "macd_trend", "donchian_breakout",
-        "rsi_mean_rev", "bb_mean_rev", "momentum", "flat", "random_benchmark",
+        "rsi_mean_rev", "bb_mean_rev", "momentum",
+        "cross_sectional_momentum", "funding_carry",
+        "flat", "random_benchmark",
     ]
     allocations: dict[str, float] = {}
     ema_fast: int = 20
@@ -86,6 +89,43 @@ class StrategiesCfg(BaseModel):
     random_seed: int = 42
     exploration_floor: float = 0.10
     rebalance_days: float = 3.0
+
+
+class FeaturesCfg(BaseModel):
+    """Переключатели всех торговых и аналитических технологий (управляются также из веб-панели)."""
+    # Этап A — качество сигналов, сопровождение и исполнение
+    regime_gating: bool = True
+    mtf_filter: bool = True
+    trailing_stop: bool = True
+    fee_edge_filter: bool = True
+    obi_filter: bool = True
+    maker_first: bool = True
+    closed_loop_learning: bool = True
+    # Этап B — некоррелированные крипто-факторы и портфельный риск
+    funding_alpha: bool = True
+    cross_sectional_momentum: bool = True
+    vol_targeting: bool = True
+    # Этап C — лёгкий ML (Meta-Labeling)
+    meta_labeling: bool = True
+    # Внешние контуры
+    ai_review: bool = True
+    copytrading: bool = True
+    # Пороговые параметры технологий
+    min_edge_to_cost: float = 3.0
+    obi_veto_threshold: float = 0.65
+    target_annual_vol: float = 0.20
+    meta_label_min_trades: int = 40
+
+    def toggle_dict(self) -> dict[str, bool]:
+        return {
+            k: bool(getattr(self, k))
+            for k in (
+                "regime_gating", "mtf_filter", "trailing_stop", "fee_edge_filter",
+                "obi_filter", "maker_first", "closed_loop_learning",
+                "funding_alpha", "cross_sectional_momentum", "vol_targeting",
+                "meta_labeling", "ai_review", "copytrading",
+            )
+        }
 
 
 class AiCfg(BaseModel):
@@ -136,6 +176,7 @@ class Settings(BaseModel):
     execution: ExecutionCfg = ExecutionCfg()
     risk: RiskCfg = RiskCfg()
     strategies: StrategiesCfg = StrategiesCfg()
+    features: FeaturesCfg = FeaturesCfg()
     ai: AiCfg = AiCfg()
     copytrading: CopyTradingCfg = CopyTradingCfg()
     verdict: VerdictCfg = VerdictCfg()

@@ -112,18 +112,53 @@ def cmd_selftest(a) -> int:
     return 0
 
 
+def cmd_remote_report(a) -> int:
+    import json
+    import time
+    from pathlib import Path
+    import requests
+    from .config import load_dotenv
+
+    load_dotenv(".env")
+    base = (a.url or os.getenv("REMOTE_BOT_URL", "https://insider-trader.onrender.com")).rstrip("/")
+    token = (a.token or os.getenv("REPORT_API_TOKEN", "") or os.getenv("ADMIN_PASSWORD", "")).strip()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    r = requests.get(f"{base}/api/agent/report", headers=headers, timeout=30)
+    if r.status_code == 401:
+        print("[ОШИБКА] 401 Unauthorized: задайте REPORT_API_TOKEN или ADMIN_PASSWORD в .env (или --token).")
+        return 1
+    r.raise_for_status()
+    data = r.json()
+    out_dir = Path("reports")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M", time.gmtime())
+    json_path = out_dir / f"remote_report_{stamp}.json"
+    md_path = out_dir / f"remote_report_{stamp}.md"
+    json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    md_text = data.get("report_markdown", "")
+    md_path.write_text(md_text, encoding="utf-8")
+    print(md_text)
+    st = data.get("status") or {}
+    print(f"\n[Remote] v{data.get('version')} | exchange={st.get('exchange')} | regime={st.get('regime')} | ML={st.get('ml')}")
+    print(f"Сохранено:\n  {json_path}\n  {md_path}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m bot", description="Crypto bot (paper trading)")
-    p.add_argument("command", nargs="?", default="run", choices=["run", "report", "doctor", "selftest", "health", "reset-halt", "version"])
+    p.add_argument("command", nargs="?", default="run",
+                   choices=["run", "report", "remote-report", "doctor", "selftest", "health", "reset-halt", "version"])
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--days", type=float, default=3.0)
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--url", default="")
+    p.add_argument("--token", default="")
     a = p.parse_args(argv)
     if a.command == "version":
         print(__version__)
         return 0
-    return {"run": cmd_run, "report": cmd_report, "doctor": cmd_doctor, "selftest": cmd_selftest,
-            "health": cmd_health, "reset-halt": cmd_reset_halt}[a.command](a)
+    return {"run": cmd_run, "report": cmd_report, "remote-report": cmd_remote_report, "doctor": cmd_doctor,
+            "selftest": cmd_selftest, "health": cmd_health, "reset-halt": cmd_reset_halt}[a.command](a)
 
 
 if __name__ == "__main__":

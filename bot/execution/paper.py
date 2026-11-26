@@ -66,6 +66,7 @@ class PaperExecutor(Executor):
             return self._reject(req, f"no_book: {type(e).__name__}")
         if not book.bids or not book.asks:
             return self._reject(req, "empty_book")
+        liquidity = "taker"
         if req.reduce_only:
             w = book.walk(req.side, req.qty, None)
         else:
@@ -73,14 +74,26 @@ class PaperExecutor(Executor):
             allowed = min(req.qty, avail * c.max_participation)
             if allowed < req.qty * c.min_fill_ratio:
                 return self._reject(req, "insufficient_liquidity")
-            w = book.walk(req.side, allowed, c.max_slippage_bps)
+            # Maker-First (Post-Only): если стакан не убегает резко от нас, моделируем пассивный вход по лучшей цене
+            sgn = 1.0 if req.side == "buy" else -1.0
+            signed_obi = sgn * book.imbalance(10)
+            if req.maker_preferred and signed_obi < 0.45 and book.best_bid > 0 and book.best_ask > 0:
+                px = book.best_bid if req.side == "buy" else book.best_ask
+                from ..models import WalkResult
+                w = WalkResult(allowed, px, allowed * px, 1, "")
+                liquidity = "maker"
+            else:
+                w = book.walk(req.side, allowed, c.max_slippage_bps)
         if w.filled <= 0:
             return self._reject(req, "no_fill")
-        bps = c.perp_taker_fee_bps if req.instrument == "perp" else c.taker_fee_bps
+        if liquidity == "maker":
+            bps = c.perp_maker_fee_bps if req.instrument == "perp" else c.maker_fee_bps
+        else:
+            bps = c.perp_taker_fee_bps if req.instrument == "perp" else c.taker_fee_bps
         fee = w.notional * bps / 1e4
         ref = req.ref_price or book.mid
         slip = ((w.avg_px / ref - 1) if req.side == "buy" else (1 - w.avg_px / ref)) * 1e4
-        fill = Fill(uuid.uuid4().hex, self.clock(), w.avg_px, w.filled, fee, slip)
+        fill = Fill(uuid.uuid4().hex, self.clock(), w.avg_px, w.filled, fee, slip, liquidity=liquidity)
         status = "filled" if w.filled >= req.qty * (1 - 1e-9) else "partial"
         res = OrderResult(status, [fill])
         self._persist(req, res)

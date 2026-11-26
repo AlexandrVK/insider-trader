@@ -65,6 +65,12 @@ td,th{border-bottom:1px solid #262626;padding:6px 8px;text-align:left}th{color:#
 .g{color:#5c5}.x{color:#e55}.m{color:#888}
 .w{background:#4a3a10;padding:8px 12px;border-radius:4px;font-size:13px;margin-bottom:10px}
 .t{overflow-x:auto}
+.fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-bottom:12px}
+.fi{background:#161616;border:1px solid #262626;border-radius:6px;padding:8px 10px;display:flex;gap:8px;align-items:flex-start;cursor:pointer}
+.fi:hover{border-color:#3b4d61}
+.fi input{margin-top:3px;width:16px;height:16px;accent-color:#2ecc71;cursor:pointer}
+.fi b{font-size:13px;color:#eee;display:block}.fi small{font-size:11px;color:#888;display:block;margin-top:2px}
+.tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px;background:#243447;color:#9cf}
 </style></head><body>
 <h1>Autonomous Crypto Bot v__VERSION__ <small class="m">· paper (виртуальный счёт 24/7)</small></h1>
 __WARN__
@@ -75,11 +81,13 @@ __WARN__
   <button class="r" onclick="if(confirm('Сбросить риск-стоп и паузу?'))cmd('reset_halt')">Сброс риск-стопа</button>
   <a class="b" href="/report">Отчёт (MD/HTML)</a>
   <a class="b" href="/analytics.json" download>Скачать JSON</a>
+  <a class="b" href="/api/agent/report" download>Отчёт API (JSON)</a>
   <button onclick="load()">Обновить</button>
   __LOGOUT__
   <span id="msg" class="m" style="margin-left:8px"></span>
 </p>
 
+<h2>Технологии и модули (вкл/выкл)</h2><div class="fg" id="feats"></div>
 <h2>Открытые позиции</h2><div class="t" id="pos"></div>
 <h2>Веса стратегий (Мета-селектор) и PnL</h2><div class="t" id="strats"></div>
 <h2>Последние закрытые сделки</h2><div class="t" id="trades"></div>
@@ -94,7 +102,34 @@ const tbl=(h,rows)=>'<table><tr>'+h.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr
   (rows.length?rows.map(r=>'<tr>'+r.map(x=>'<td>'+(x&&x.h?x.h:esc(x))+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+h.length+'" class="m">нет данных</td></tr>')+'</table>';
 const pn=v=>({h:'<span class="'+(Number(v)>=0?'g':'x')+'">'+esc(Number(v).toFixed(2))+'</span>'});
 
+const FEAT_META=[
+  ['regime_gating','A','Режимный фильтр','Трендовые в trend/high_vol, RSI/BB только в flat'],
+  ['mtf_filter','A','MTF-фильтр 4h','Сверка трендовых входов со старшим трендом 4h EMA'],
+  ['trailing_stop','A','Безубыток + Chandelier','Перевод в БУ (+1.5 ATR), 50% TP и трейлинг-стоп'],
+  ['fee_edge_filter','A','Фильтр комиссий ≥3x','Отсев сделок с малым потенциалом к издержкам'],
+  ['obi_filter','A','Стакан (OBI фильтр)','Блокировка входа против сильной стены в стакане'],
+  ['maker_first','A','Maker-First исполнение','Пассивный лимитный вход (низкие maker-комиссии)'],
+  ['closed_loop_learning','A','Самообучение + CUSUM','Калибратор уверенности, Thompson Sampling, возврат CUSUM'],
+  ['funding_alpha','B','Funding Carry / знак','Сбор высокого фандинга + знак фандинга в RiskEngine'],
+  ['cross_sectional_momentum','B','Кросс-моментум к BTC','Лонг лидеров и шорт аутсайдеров относительно BTC'],
+  ['vol_targeting','B','Volatility Targeting','Масштаб риска (0.35–1.25x) по волатильности BTC'],
+  ['meta_labeling','C','ML Meta-Labeling','Оценка P(win) по контексту и скейлинг позиции'],
+  ['ai_review','ИИ','ИИ-аналитики (LLM)','Каскад Groq → AnyModel → OpenRouter → лексикон'],
+  ['copytrading','Copy','Hyperliquid Копитрейдинг','Согласованные входы топ-трейдеров Hyperliquid']
+];
+
 let S={};
+async function toggleFeat(k,el){
+  $('msg').textContent='Сохраняю '+k+'…';
+  try{
+    const r=await fetch('/api/features',{method:'POST',headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},body:JSON.stringify({feature:k,enabled:el.checked})});
+    if(r.status===401){location='/login';return}
+    const d=await r.json();
+    if(!r.ok){el.checked=!el.checked;$('msg').textContent=d.error||'ошибка';return}
+    $('msg').textContent=k+': '+(el.checked?'включено':'выключено');
+    load();
+  }catch(e){el.checked=!el.checked;$('msg').textContent='Ошибка: '+e}
+}
 async function load(){
   try{
     const r=await fetch('/api/status',{headers:{'X-Requested-With':'fetch'}});
@@ -108,6 +143,9 @@ async function load(){
     const s3Text=s3.enabled?('S3: '+s3.saves+' ('+s3.uploaded_mb+' MB)'):'Локально';
     const ai=S.ai||{};
     const aiText=ai.last_provider?(ai.last_provider+' ('+ai.llm_ok+' ok)'):('локально');
+    const ml=S.ml||{};
+    const mlText=ml.active?('активен ('+ml.train_acc_pct+'%)'):('сбор '+Number(ml.samples||0)+'/'+Number(ml.min_trades||40));
+    const vt=S.vol_targeting||{};
     const cd=[
       ['Капитал $', eq.toFixed(2)],
       ['Доход, %', ret+'%'],
@@ -117,7 +155,9 @@ async function load(){
       ['Просадка, %', (S.drawdown_pct??0).toFixed(2)+'%'],
       ['Открыто поз.', (S.open_positions||[]).length],
       ['Закрыто сд.', S.n_trades??(S.stats||{}).closed??0],
-      ['Биржа', S.exchange||'-'],
+      ['Биржа / Режим', (S.exchange||'-')+' / '+(S.regime||'-')],
+      ['Vol-скаляр', (vt.vol_scalar??1).toFixed(2)+'x'],
+      ['ML Meta-Label', mlText],
       ['ИИ', aiText],
       ['Статус', stText],
       ['Последний цикл', tm(S.last_cycle_ts)],
@@ -125,6 +165,12 @@ async function load(){
     ];
     $('cards').innerHTML=cd.map(c=>'<div class="c"><b>'+esc(c[1])+'</b><span>'+esc(c[0])+'</span></div>').join('');
     $('bp').textContent=S.paused?'Продолжить':'Пауза';
+
+    const fm=S.features||{};
+    $('feats').innerHTML=FEAT_META.map(([k,st,name,desc])=>{
+      const on=fm[k]!==false;
+      return '<label class="fi"><input type="checkbox" '+(on?'checked':'')+' onchange="toggleFeat(\''+k+'\',this)"><div><b><span class="tag">'+esc(st)+'</span>'+esc(name)+'</b><small>'+esc(desc)+'</small></div></label>';
+    }).join('');
 
     $('pos').innerHTML=tbl(
       ['Символ','Инстр.','Сторона','Стратегия','Вход','Текущая','Стоп','Тейк','uPnL $','Открыта'],
@@ -170,6 +216,8 @@ async def run_web_server(
     cmd_fn: Optional[Callable[[str], str]] = None,
     host: Optional[str] = None,
     port: Optional[int] = None,
+    feature_fn: Optional[Callable[[str, bool], dict]] = None,
+    agent_report_fn: Optional[Callable[[], dict]] = None,
 ) -> None:
     render = is_render()
     bind_host = host or ("0.0.0.0" if render else "127.0.0.1")
@@ -177,6 +225,7 @@ async def run_web_server(
 
     # Локально пароль НЕ спрашивается; на Render требуется ADMIN_PASSWORD >= 12 символов
     pwd = os.getenv("ADMIN_PASSWORD", "")
+    api_token = os.getenv("REPORT_API_TOKEN", "").strip() or pwd
     auth_on = render
     locked = render and len(pwd) < 12
     secret = (os.getenv("SESSION_SECRET", "") or hashlib.sha256(("sess|" + pwd).encode()).hexdigest()).encode()
@@ -199,6 +248,22 @@ async def run_web_server(
             return bool(p) and hmac.compare_digest(sig, _sig(p)) and int(p.split(".")[0]) > time.time()
         except ValueError:
             return False
+
+    def _bearer_authed(req: web.Request) -> bool:
+        if not auth_on:
+            return True
+        if len(api_token) < 12:
+            return False
+        hdr = req.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer "):
+            return False
+        given = hdr[7:].strip()
+        if not given:
+            return False
+        return hmac.compare_digest(
+            hashlib.sha256(given.encode()).digest(),
+            hashlib.sha256(api_token.encode()).digest(),
+        )
 
     def _client_ip(req: web.Request) -> str:
         fwd = req.headers.get("X-Forwarded-For", "").split(",")[0].strip()
@@ -270,6 +335,40 @@ async def run_web_server(
         stamp = time.strftime("analytics_%Y%m%d_%H%M.json", time.gmtime())
         return web.json_response(status_fn(), headers={"Content-Disposition": f'attachment; filename="{stamp}"'})
 
+    async def handle_features(req: web.Request) -> web.Response:
+        if locked or not _authed(req):
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if req.headers.get("X-Requested-With") != "fetch":
+            return web.json_response({"error": "forbidden"}, status=403)
+        if not feature_fn:
+            return web.json_response({"error": "feature toggles disabled"}, status=400)
+        try:
+            body = await req.json()
+            state = await asyncio.to_thread(feature_fn, str(body.get("feature", "")), bool(body.get("enabled", False)))
+            return web.json_response({"features": state})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=400)
+
+    async def handle_agent_report(req: web.Request) -> web.Response:
+        ip = _client_ip(req)
+        if auth_on and _is_locked_out(ip):
+            return web.json_response({"error": "too_many_attempts"}, status=429)
+        if locked:
+            return web.json_response({"error": "admin_password_not_configured"}, status=503)
+        if not (_authed(req) or _bearer_authed(req)):
+            if req.headers.get("Authorization"):
+                fails[ip].append(time.time())
+                all_fails.append(time.time())
+            return web.json_response({"error": "unauthorized"}, status=401)
+        if agent_report_fn:
+            data = await asyncio.to_thread(agent_report_fn)
+        else:
+            md = await asyncio.to_thread(report_fn)
+            data = {"status": status_fn(), "report_markdown": md}
+        if req.path.endswith(".md"):
+            return web.Response(text=str(data.get("report_markdown", "")), content_type="text/markdown", charset="utf-8")
+        return web.json_response(data)
+
     async def handle_cmd(req: web.Request) -> web.Response:
         if locked or not _authed(req):
             return web.json_response({"error": "unauthorized"}, status=401)
@@ -328,6 +427,9 @@ async def run_web_server(
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/status", handle_status)
     app.router.add_post("/api/cmd", handle_cmd)
+    app.router.add_post("/api/features", handle_features)
+    app.router.add_get("/api/agent/report", handle_agent_report)
+    app.router.add_get("/api/agent/report.md", handle_agent_report)
     app.router.add_get("/report", handle_report)
     app.router.add_get("/analytics.json", handle_analytics)
 

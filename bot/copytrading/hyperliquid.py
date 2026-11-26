@@ -135,14 +135,25 @@ class HyperliquidCopySource(CopySource):
                 if acc < 50_000:
                     continue
                 m_pnl, m_roi, m_vlm = 0.0, 0.0, 0.0
+                w_pnl, a_pnl = 0.0, 0.0
                 for w_name, vals in row.get("windowPerformances", []):
                     if w_name == "month":
                         m_pnl, m_roi, m_vlm = float(vals["pnl"]), float(vals["roi"]), float(vals.get("vlm") or 0)
+                    elif w_name == "week":
+                        w_pnl = float(vals["pnl"])
+                    elif w_name == "allTime":
+                        a_pnl = float(vals["pnl"])
                 turnover = m_vlm / acc if acc else 0.0
-                if m_pnl <= 0 or m_roi < 0.05 or turnover < 1.0 or turnover > 1500.0:
+                if m_pnl <= 0 or a_pnl <= 0 or m_roi < 0.05 or turnover < 1.0 or turnover > 1500.0:
                     continue
-                cands.append({"addr": row["ethAddress"], "account": acc, "month_pnl": m_pnl, "turnover": round(turnover, 1)})
-        cands.sort(key=lambda x: -x["month_pnl"])
+                # Многооконный скоринг устойчивости: месяц + неделя + allTime + умеренный оборот (отсекает лудоманов)
+                consistency = (1.0 if w_pnl > 0 else 0.6) * (1.0 / (1.0 + turnover / 400.0))
+                score = round(math.log1p(m_pnl) * min(m_roi, 2.0) * consistency, 4)
+                cands.append({
+                    "addr": row["ethAddress"], "account": acc, "month_pnl": m_pnl,
+                    "turnover": round(turnover, 1), "score": score,
+                })
+        cands.sort(key=lambda x: -x["score"])
         self.tracked = cands[: self.tracked_max]
         del cands
         gc.collect()
