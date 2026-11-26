@@ -169,7 +169,7 @@ async function load(){
     const fm=S.features||{};
     $('feats').innerHTML=FEAT_META.map(([k,st,name,desc])=>{
       const on=fm[k]!==false;
-      return '<label class="fi"><input type="checkbox" '+(on?'checked':'')+' onchange="toggleFeat(\''+k+'\',this)"><div><b><span class="tag">'+esc(st)+'</span>'+esc(name)+'</b><small>'+esc(desc)+'</small></div></label>';
+      return '<label class="fi"><input type="checkbox" data-feat="'+esc(k)+'" '+(on?'checked':'')+' onchange="toggleFeat(this.dataset.feat,this)"><div><b><span class="tag">'+esc(st)+'</span>'+esc(name)+'</b><small>'+esc(desc)+'</small></div></label>';
     }).join('');
 
     $('pos').innerHTML=tbl(
