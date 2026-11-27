@@ -292,3 +292,36 @@ async def test_timers_and_meta_rebalance_persist_across_restart(tmp_path):
     ms_changed = MetaSelector(db2, ["ema_trend", "flat"], clock=clk)
     assert ms_changed.last_rebalance_ts == 0.0
     db2.close()
+
+
+def test_web_strict_json_sanitizes_nan_and_inf():
+    import json
+    from bot.web import _strict_json_dumps
+
+    payload = {
+        "strategy_stats": {
+            "macd_trend": {
+                "n": 2,
+                "ci_lo": float("nan"),
+                "ci_hi": float("nan"),
+                "profit_factor": float("inf"),
+                "neg_inf": float("-inf"),
+                "sharpe": 1.25,
+            }
+        },
+        "list_vals": [1.0, float("nan"), float("inf")],
+        "text_keeps_word": "ci_lo: NaN Infinity",
+    }
+    raw = _strict_json_dumps(payload)
+
+    def _reject_nonstandard(token: str):
+        raise ValueError(f"Non-standard JSON token: {token}")
+
+    parsed = json.loads(raw, parse_constant=_reject_nonstandard)
+    st = parsed["strategy_stats"]["macd_trend"]
+    assert st["ci_lo"] is None and st["ci_hi"] is None
+    assert st["profit_factor"] is None and st["neg_inf"] is None
+    assert st["sharpe"] == 1.25
+    assert parsed["list_vals"] == [1.0, None, None]
+    assert parsed["text_keeps_word"] == "ci_lo: NaN Infinity"
+

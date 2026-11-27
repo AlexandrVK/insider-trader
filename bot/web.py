@@ -9,11 +9,13 @@ import collections
 import hashlib
 import hmac
 import html
+import json
 import logging
+import math
 import os
 import secrets
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from aiohttp import web
 
@@ -22,6 +24,21 @@ from .storage_s3 import is_render
 log = logging.getLogger("bot.web")
 
 SESSION_HOURS = 12
+
+
+def _sanitize_json(obj: Any) -> Any:
+    """Заменяет невалидные для RFC 8259 JSON значения NaN/Infinity на None."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
+def _strict_json_dumps(obj: Any) -> str:
+    return json.dumps(_sanitize_json(obj), ensure_ascii=False, allow_nan=False)
 
 ICON_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
@@ -327,13 +344,17 @@ async def run_web_server(
     async def handle_status(req: web.Request) -> web.Response:
         if locked or not _authed(req):
             return web.json_response({"error": "unauthorized"}, status=401)
-        return web.json_response(status_fn())
+        return web.json_response(status_fn(), dumps=_strict_json_dumps)
 
     async def handle_analytics(req: web.Request) -> web.Response:
         if locked or not _authed(req):
             return web.json_response({"error": "unauthorized"}, status=401)
         stamp = time.strftime("analytics_%Y%m%d_%H%M.json", time.gmtime())
-        return web.json_response(status_fn(), headers={"Content-Disposition": f'attachment; filename="{stamp}"'})
+        return web.json_response(
+            status_fn(),
+            headers={"Content-Disposition": f'attachment; filename="{stamp}"'},
+            dumps=_strict_json_dumps,
+        )
 
     async def handle_features(req: web.Request) -> web.Response:
         if locked or not _authed(req):
@@ -367,7 +388,7 @@ async def run_web_server(
             data = {"status": status_fn(), "report_markdown": md}
         if req.path.endswith(".md"):
             return web.Response(text=str(data.get("report_markdown", "")), content_type="text/markdown", charset="utf-8")
-        return web.json_response(data)
+        return web.json_response(data, dumps=_strict_json_dumps)
 
     async def handle_cmd(req: web.Request) -> web.Response:
         if locked or not _authed(req):
