@@ -325,3 +325,14 @@ def test_web_strict_json_sanitizes_nan_and_inf():
     assert parsed["list_vals"] == [1.0, None, None]
     assert parsed["text_keeps_word"] == "ci_lo: NaN Infinity"
 
+
+def test_web_panel_contains_tooltips_for_all_features():
+    from bot.config import FeaturesCfg
+    from bot.web import PANEL_HTML
+
+    assert 'id="ftip"' in PANEL_HTML
+    assert "showTip(" in PANEL_HTML
+    for key in FeaturesCfg().toggle_dict():
+        assert f"'{key}'" in PANEL_HTML
+
+

@@ -83,11 +83,18 @@ td,th{border-bottom:1px solid #262626;padding:6px 8px;text-align:left}th{color:#
 .w{background:#4a3a10;padding:8px 12px;border-radius:4px;font-size:13px;margin-bottom:10px}
 .t{overflow-x:auto}
 .fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:8px;margin-bottom:12px}
-.fi{background:#161616;border:1px solid #262626;border-radius:6px;padding:8px 10px;display:flex;gap:8px;align-items:flex-start;cursor:pointer}
-.fi:hover{border-color:#3b4d61}
-.fi input{margin-top:3px;width:16px;height:16px;accent-color:#2ecc71;cursor:pointer}
-.fi b{font-size:13px;color:#eee;display:block}.fi small{font-size:11px;color:#888;display:block;margin-top:2px}
+.fi{background:#161616;border:1px solid #262626;border-radius:6px;padding:8px 10px;display:flex;gap:8px;align-items:flex-start;cursor:pointer;position:relative}
+.fi:hover{border-color:#4b6584;background:#1a2028}
+.fi input{margin-top:3px;width:16px;height:16px;accent-color:#2ecc71;cursor:pointer;flex:0 0 auto}
+.fi>div{flex:1;min-width:0}
+.fi b{font-size:13px;color:#eee;display:block;padding-right:18px}.fi small{font-size:11px;color:#888;display:block;margin-top:2px}
 .tag{display:inline-block;font-size:10px;padding:1px 5px;border-radius:3px;margin-right:4px;background:#243447;color:#9cf}
+.q{position:absolute;top:7px;right:8px;width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;font-size:11px;font-weight:700;background:#243447;color:#9cf}
+#ftip{position:fixed;z-index:9999;display:none;pointer-events:none;max-width:360px;background:#0d141c;color:#e6edf3;border:1px solid #3b5570;border-radius:8px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.65);font-size:12px;line-height:1.45}
+#ftip .ft-h{font-weight:700;color:#fff;margin-bottom:4px;font-size:13px}
+#ftip .ft-t{color:#9cf;font-size:11px;margin-bottom:6px}
+#ftip .ft-p{margin:4px 0;color:#d0d7de}
+#ftip .ft-off{margin-top:6px;padding-top:6px;border-top:1px solid #243447;color:#f2cc60;font-size:11px}
 </style></head><body>
 <h1>Autonomous Crypto Bot v__VERSION__ <small class="m">· paper (виртуальный счёт 24/7)</small></h1>
 __WARN__
@@ -104,7 +111,8 @@ __WARN__
   <span id="msg" class="m" style="margin-left:8px"></span>
 </p>
 
-<h2>Технологии и модули (вкл/выкл)</h2><div class="fg" id="feats"></div>
+<h2>Технологии и модули (вкл/выкл · наведите для справки)</h2><div class="fg" id="feats"></div>
+<div id="ftip" role="tooltip"></div>
 <h2>Открытые позиции</h2><div class="t" id="pos"></div>
 <h2>Веса стратегий (Мета-селектор) и PnL</h2><div class="t" id="strats"></div>
 <h2>Последние закрытые сделки</h2><div class="t" id="trades"></div>
@@ -120,20 +128,81 @@ const tbl=(h,rows)=>'<table><tr>'+h.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr
 const pn=v=>({h:'<span class="'+(Number(v)>=0?'g':'x')+'">'+esc(Number(v).toFixed(2))+'</span>'});
 
 const FEAT_META=[
-  ['regime_gating','A','Режимный фильтр','Трендовые в trend/high_vol, RSI/BB только в flat'],
-  ['mtf_filter','A','MTF-фильтр 4h','Сверка трендовых входов со старшим трендом 4h EMA'],
-  ['trailing_stop','A','Безубыток + Chandelier','Перевод в БУ (+1.5 ATR), 50% TP и трейлинг-стоп'],
-  ['fee_edge_filter','A','Фильтр комиссий ≥3x','Отсев сделок с малым потенциалом к издержкам'],
-  ['obi_filter','A','Стакан (OBI фильтр)','Блокировка входа против сильной стены в стакане'],
-  ['maker_first','A','Maker-First исполнение','Пассивный лимитный вход (низкие maker-комиссии)'],
-  ['closed_loop_learning','A','Самообучение + CUSUM','Калибратор уверенности, Thompson Sampling, возврат CUSUM'],
-  ['funding_alpha','B','Funding Carry / знак','Сбор высокого фандинга + знак фандинга в RiskEngine'],
-  ['cross_sectional_momentum','B','Кросс-моментум к BTC','Лонг лидеров и шорт аутсайдеров относительно BTC'],
-  ['vol_targeting','B','Volatility Targeting','Масштаб риска (0.35–1.25x) по волатильности BTC'],
-  ['meta_labeling','C','ML Meta-Labeling','Оценка P(win) по контексту и скейлинг позиции'],
-  ['ai_review','ИИ','ИИ-аналитики (LLM)','Каскад Groq → AnyModel → OpenRouter → лексикон'],
-  ['copytrading','Copy','Hyperliquid Копитрейдинг','Согласованные входы топ-трейдеров Hyperliquid']
+  ['regime_gating','A','Режимный фильтр','Трендовые в trend/high_vol, RSI/BB только в flat',
+   'Regime Gating — фильтр рыночного режима (ADX, волатильность, паника)',
+   'Разрешает контртрендовые стратегии (RSI/Bollinger) только в боковике (flat, ADX < 22) и блокирует их в тренде, высокой волатильности и панике.',
+   'Если выключить: RSI/BB начнут входить против сильных трендов — сделок станет больше, но вырастет риск серий стопов.'],
+  ['mtf_filter','A','MTF-фильтр 4h','Сверка трендовых входов со старшим трендом 4h EMA',
+   'Multi-Timeframe Filter — фильтр старшего таймфрейма (4h EMA20/EMA50)',
+   'Проверяет направление 4h-графика (порог ±0.2% между EMA20 и EMA50) для трендовых стратегий на 1h. Стоит ДО ИИ-аналитиков, отсекая контртренд и экономя квоту LLM.',
+   'Если выключить: вырастет число входов и расход ИИ-запросов, но появятся сделки против 4-часового тренда.'],
+  ['trailing_stop','A','Безубыток + Chandelier','Перевод в БУ (+1.5 ATR), 50% TP и трейлинг-стоп',
+   'Breakeven + Partial TP + Chandelier Trailing Stop',
+   'При движении позиции в плюс на +1.5 ATR переводит стоп в безубыток, фиксирует 50% объёма и ведёт остаток скользящим стопом Chandelier.',
+   'Если выключить: позиции будут закрываться только по исходным жёстким стопу и тейку без частичной фиксации.'],
+  ['fee_edge_filter','A','Фильтр комиссий ≥3x','Отсев сделок с малым потенциалом к издержкам',
+   'Fee-to-Edge Filter — отношение потенциала сделки к комиссиям и спреду',
+   'Сравнивает расстояние до тейк-профита с полными издержками входа/выхода (2× комиссия + спред) и блокирует входы с запасом меньше 3.0x.',
+   'Если выключить: бот начнёт брать узкие движения, где комиссии могут съедать всю прибыль.'],
+  ['obi_filter','A','Стакан (OBI фильтр)','Блокировка входа против сильной стены в стакане',
+   'Order Book Imbalance — дисбаланс топ-10 уровней биржевого стакана',
+   'Оценивает перевес лимитных заявок на покупку vs продажу. Если против направления входа стоит крупная стена (|OBI| > 0.65), сделка отклоняется.',
+   'Если выключить: бот перестанет учитывать локальные стены заявок в стакане при открытии позиции.'],
+  ['maker_first','A','Maker-First исполнение','Пассивный лимитный вход (низкие maker-комиссии)',
+   'Maker-First Execution — приоритет пассивных лимитных ордеров',
+   'При спокойном стакане (signed OBI < 0.45) ставит лимитный вход по лучшей цене бида/аска: комиссия 4 bps вместо 10 bps на споте и 2 bps вместо 5 bps на перпах.',
+   'Если выключить: все входы идут рыночными taker-ордерами с повышенной комиссией и проскальзыванием.'],
+  ['closed_loop_learning','A','Самообучение + CUSUM','Калибратор уверенности, Thompson Sampling, возврат CUSUM',
+   'Closed-Loop Learning — замкнутый контур адаптации по реальным сделкам',
+   'Калибрует уверенность ИИ (ConfidenceCalibrator), обновляет байесовские веса источников (Thompson Sampling) и включает детектор деградации CUSUM с 7-дневным возвратом.',
+   'Если выключить: веса источников и калибровка уверенности перестанут адаптироваться к фактическим исходам.'],
+  ['funding_alpha','B','Funding Carry / знак','Сбор высокого фандинга + знак фандинга в RiskEngine',
+   'Funding Alpha — учёт знака 8-часового фандинга и стратегия Funding Carry',
+   'Блокирует только невыгодный высокий фандинг (>0.1%, который платим мы), пропускает выгодный и активирует стратегию funding_carry для сбора повышенных ставок.',
+   'Если выключить: высокий фандинг режется по модулю в обе стороны, а стратегия funding_carry отключается.'],
+  ['cross_sectional_momentum','B','Кросс-моментум к BTC','Лонг лидеров и шорт аутсайдеров относительно BTC',
+   'Cross-Sectional Momentum — относительная сила альткоинов к BTC',
+   'Раз в 4 часа ранжирует топ-12 монет относительно BTC/USDT: открывает лонги по самым сильным активам и шорты по самым слабым.',
+   'Если выключить: 4-часовой сканер кросс-секционного моментума перестаёт генерировать сигналы.'],
+  ['vol_targeting','B','Volatility Targeting','Масштаб риска (0.35–1.25x) по волатильности BTC',
+   'Portfolio Volatility Targeting — таргетирование 20% годовой волатильности',
+   'По 48-часовой волатильности BTC масштабирует размер новых позиций в пределах 0.35x–1.25x: режет плечо при шторме и слегка повышает на спокойном рынке.',
+   'Если выключить: размер позиции рассчитывается без поправки на общую волатильность BTC (множитель 1.0x).'],
+  ['meta_labeling','C','ML Meta-Labeling','Оценка P(win) по контексту и скейлинг позиции',
+   'ML Meta-Labeling — логистическая регрессия вероятности успеха сигнала',
+   'Оценивает P(win) по режиму, MTF, OBI, фандингу, спреду и ATR; режет слабые сигналы и масштабирует размер. Автоматически ждёт 40 закрытых сделок и до этого не мешает.',
+   'Если выключить: ML-фильтрация и скейлинг не включатся даже после накопления 40 сделок.'],
+  ['ai_review','ИИ','ИИ-аналитики (LLM)','Каскад Groq → AnyModel → OpenRouter → лексикон',
+   'AI Multi-Analyst Review — 4 ИИ-аналитика (News, Macro, On-chain, Risk Critic)',
+   'Прогоняет каждый сигнал (кроме random_benchmark) через каскад LLM и агрегатор; может скорректировать уверенность или наложить вето (ai_veto_or_conflict).',
+   'Если выключить: бот переходит на чистую алгоритмическую торговлю без запросов к LLM и обновления RSS.'],
+  ['copytrading','Copy','Hyperliquid Копитрейдинг','Согласованные входы топ-трейдеров Hyperliquid',
+   'Hyperliquid Copytrading — многооконный отбор и копирование топ-трейдеров',
+   'Раз в сутки отбирает до 10 устойчивых трейдеров (week/month/allTime) и раз в минуту проверяет их позиции; при согласованном входе ≥2 трейдеров шлёт сигнал в риск-контур.',
+   'Если выключить: мониторинг лидерборда и позиций Hyperliquid полностью останавливается.']
 ];
+const FEAT_MAP=Object.fromEntries(FEAT_META.map(x=>[x[0],x]));
+let tipKey='';
+function posTip(ev){
+  const t=$('ftip');if(!t||t.style.display==='none')return;
+  const pad=12,tw=t.offsetWidth||320,th=t.offsetHeight||120;
+  let x=ev.clientX+14,y=ev.clientY-th-14;
+  if(x+tw+pad>window.innerWidth)x=Math.max(pad,window.innerWidth-tw-pad);
+  if(y<pad)y=Math.min(window.innerHeight-th-pad,ev.clientY+18);
+  t.style.left=x+'px';t.style.top=y+'px';
+}
+function showTip(k,ev){
+  const m=FEAT_MAP[k],t=$('ftip');if(!m||!t)return;
+  tipKey=k;
+  const on=(S.features||{})[k]!==false;
+  t.innerHTML='<div class="ft-h">'+esc(m[2])+' <span class="tag">'+(on?'ВКЛ':'ВЫКЛ')+'</span></div>'+
+    '<div class="ft-t">'+esc(m[4])+'</div>'+
+    '<div class="ft-p">'+esc(m[5])+'</div>'+
+    '<div class="ft-off">'+esc(m[6])+'</div>';
+  t.style.display='block';
+  posTip(ev);
+}
+function hideTip(){tipKey='';const t=$('ftip');if(t)t.style.display='none';}
 
 let S={};
 async function toggleFeat(k,el){
@@ -186,7 +255,7 @@ async function load(){
     const fm=S.features||{};
     $('feats').innerHTML=FEAT_META.map(([k,st,name,desc])=>{
       const on=fm[k]!==false;
-      return '<label class="fi"><input type="checkbox" data-feat="'+esc(k)+'" '+(on?'checked':'')+' onchange="toggleFeat(this.dataset.feat,this)"><div><b><span class="tag">'+esc(st)+'</span>'+esc(name)+'</b><small>'+esc(desc)+'</small></div></label>';
+      return '<label class="fi" data-tip="'+esc(k)+'"><input type="checkbox" data-feat="'+esc(k)+'" '+(on?'checked':'')+' onchange="toggleFeat(this.dataset.feat,this)"><div><b><span class="tag">'+esc(st)+'</span>'+esc(name)+'</b><small>'+esc(desc)+'</small></div><span class="q" aria-hidden="true">?</span></label>';
     }).join('');
 
     $('pos').innerHTML=tbl(
@@ -220,6 +289,12 @@ async function cmd(action){
     $('msg').textContent=d.result||d.error||'ok';
     load();
   }catch(e){$('msg').textContent='Ошибка: '+e}
+}
+const featsEl=$('feats');
+if(featsEl){
+  featsEl.addEventListener('mouseover',e=>{const c=e.target.closest('.fi');if(c&&c.dataset.tip)showTip(c.dataset.tip,e);});
+  featsEl.addEventListener('mousemove',e=>{if(tipKey)posTip(e);});
+  featsEl.addEventListener('mouseout',e=>{const c=e.target.closest('.fi');if(c&&(!e.relatedTarget||!c.contains(e.relatedTarget)))hideTip();});
 }
 load();
 setInterval(()=>{if(!document.hidden)load()},30000);
